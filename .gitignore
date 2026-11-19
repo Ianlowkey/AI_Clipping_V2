@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+node_modules/
+dist/
+src-tauri/target/
+.env
+*.log
+rustup-init.exe
+
