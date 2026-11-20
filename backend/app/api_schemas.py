@@ -7,7 +7,6 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=5000)
     video_url: str | None = Field(default=None, max_length=2048)
-    source_video_name: str | None = Field(default=None, max_length=500)
 
     @field_validator("name")
     @classmethod
@@ -23,7 +22,10 @@ class SourceVideoRead(BaseModel):
     source_type: str
     source_uri: str
     title: str | None
+    local_path: str | None
+    duration_seconds: float | None
     created_at: datetime
+    metadata_json: str | None
 
     model_config = {"from_attributes": True}
 

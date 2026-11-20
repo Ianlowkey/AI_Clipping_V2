@@ -177,6 +177,9 @@ h1 { margin: 0; font-size: 28px; letter-spacing: -0.03em; }
 .project-form small,.optional { color:#8e96a7;font-size:12px;font-weight:400; }
 .project-form input[type=file] { padding:8px; }.project-form button:disabled { opacity:.65;cursor:wait; }
 .form-error { color:#ff9d91;margin:0; }
+.upload-progress,.preparation-report { display:grid;gap:8px;padding:13px;border:1px solid #2a3142;border-radius:9px;color:#dfe4ee;font-size:13px; }
+.upload-progress progress { width:100%;height:8px;accent-color:#777cf7; }
+.preparation-report { border-color:#245342;background:#11231e; }.preparation-report small { color:#a8c7b9; }
 .clip-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px; }
 .clip-card { display:grid;gap:10px;padding:12px;background:#10141e;border:1px solid #202636;border-radius:12px; }
 .clip-preview { min-height:130px;display:grid;place-content:center;justify-items:center;gap:8px;color:#9fa7b7;background:#1a1f2d;border-radius:8px; }

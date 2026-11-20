@@ -39,6 +39,7 @@ class SourceVideo(Base):
     local_path: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(String(500))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
 
     project: Mapped["Project"] = relationship(back_populates="source_videos")

@@ -2,7 +2,7 @@
 
 AIClipping Desktop is a local-first Windows application for turning long-form video into vertical short-form clips.
 
-This repository is currently in **Phase 1: project foundation**. The desktop shell and local FastAPI backend are being established first; video processing is not yet implemented.
+The application interface and local video import/preparation are implemented. AI transcription, highlight detection, clipping, rendering, and metadata generation are not implemented.
 
 ## Local Browser Development
 
@@ -13,6 +13,7 @@ You can run the React/Vite UI in a browser without launching Tauri. This mode us
 - Windows 10/11, 64-bit
 - Python 3.12 (the app environment is `.venv`; Python 3.15 is not changed or used)
 - Node.js with npm
+- FFmpeg and FFprobe available on `PATH` (or configure `AICLIPPING_FFMPEG_PATH` and `AICLIPPING_FFPROBE_PATH`)
 
 ### First-time setup
 
@@ -48,6 +49,14 @@ Open `http://127.0.0.1:1420` in your browser. The dashboard reports whether the 
 ```powershell
 npm run dev -- --host 127.0.0.1
 ```
+
+### Import and prepare a local video
+
+Create a project, choose a local video file, then select **Create project**. The browser sends the file to the local FastAPI service, which validates and copies it under the project's `source` directory, then uses FFprobe and FFmpeg to check stream metadata and decode the first video frame. The dashboard displays the preparation report. Video URL entries are saved as notes only; they are not downloaded.
+
+By default, project files and SQLite data live under `%LOCALAPPDATA%\AIClippingData` (or `~\AIClippingData` when `LOCALAPPDATA` is unavailable). Set `AICLIPPING_DATA_DIR` to use another root and `AICLIPPING_MAX_UPLOAD_SIZE_BYTES` to change the 20 GiB upload limit. If an existing database is found under the previous `%LOCALAPPDATA%\AIClipping` location, startup copies it to the new root without deleting the original.
+
+Manual smoke check: create a project, upload a readable MP4, confirm duration/resolution/codecs/audio in the report and verify the file under `AIClippingData\projects\<id>\source`. Then try a text file renamed to `.mp4` and confirm it is rejected with a preparation error and no imported source.
 
 ### Stop
 
