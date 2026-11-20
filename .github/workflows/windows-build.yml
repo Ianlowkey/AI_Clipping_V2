@@ -61,9 +61,34 @@ jobs:
       - name: Build Tauri NSIS installer
         run: npm run tauri -- build --ci --bundles nsis --target x86_64-pc-windows-msvc --no-sign
 
+      - name: Inspect bundle output and require NSIS installer
+        shell: pwsh
+        run: |
+          $targetRoot = Join-Path $env:GITHUB_WORKSPACE "src-tauri\target"
+          $bundleDirs = @(
+            (Join-Path $targetRoot "release\bundle"),
+            (Join-Path $targetRoot "x86_64-pc-windows-msvc\release\bundle")
+          )
+
+          foreach ($dir in $bundleDirs) {
+            Write-Host "Bundle directory: $dir"
+            if (Test-Path $dir) {
+              Get-ChildItem -LiteralPath $dir -Force -Recurse | Select-Object FullName, Length
+            } else {
+              Write-Host "Directory does not exist."
+            }
+          }
+
+          $nsisDir = Join-Path $targetRoot "x86_64-pc-windows-msvc\release\bundle\nsis"
+          $installers = @(Get-ChildItem -LiteralPath $nsisDir -Filter *.exe -File -ErrorAction SilentlyContinue)
+          if ($installers.Count -eq 0) {
+            throw "Tauri did not generate an NSIS .exe installer in $nsisDir"
+          }
+          $installers | Select-Object FullName, Length
+
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v6
         with:
           name: windows-installer
-          path: src-tauri/target/release/bundle/nsis/
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
           if-no-files-found: error
