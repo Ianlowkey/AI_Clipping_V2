@@ -45,4 +45,37 @@ def create_database() -> Engine:
     if "metadata_json" not in source_columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE source_videos ADD COLUMN metadata_json TEXT"))
+    job_columns = {column["name"] for column in inspect(engine).get_columns("processing_jobs")}
+    job_migrations = {
+        "job_type": "VARCHAR(32) NOT NULL DEFAULT 'generic'",
+        "stage": "VARCHAR(40)",
+        "active_project_id": "VARCHAR(36)",
+        "model_name": "VARCHAR(100)",
+        "device": "VARCHAR(32)",
+        "compute_type": "VARCHAR(32)",
+        "language": "VARCHAR(16)",
+        "started_at": "DATETIME",
+        "completed_at": "DATETIME",
+    }
+    transcript_columns = {column["name"] for column in inspect(engine).get_columns("transcripts")}
+    transcript_migrations = {
+        "words_path": "TEXT",
+        "source_filename": "VARCHAR(500)",
+        "model_name": "VARCHAR(100)",
+        "device": "VARCHAR(32)",
+        "compute_type": "VARCHAR(32)",
+        "language_probability": "FLOAT",
+        "duration_seconds": "FLOAT",
+    }
+    with engine.begin() as connection:
+        for name, column_type in job_migrations.items():
+            if name not in job_columns:
+                connection.execute(text(f"ALTER TABLE processing_jobs ADD COLUMN {name} {column_type}"))
+        for name, column_type in transcript_migrations.items():
+            if name not in transcript_columns:
+                connection.execute(text(f"ALTER TABLE transcripts ADD COLUMN {name} {column_type}"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_processing_active_transcription "
+            "ON processing_jobs(active_project_id) WHERE active_project_id IS NOT NULL"
+        ))
     return engine

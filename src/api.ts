@@ -55,6 +55,42 @@ export type ProcessingJob = {
   error_message: string | null;
   created_at: string;
   updated_at: string;
+  job_type: string;
+  stage: string | null;
+  model_name: string | null;
+  device: string | null;
+  compute_type: string | null;
+};
+
+export type TranscriptionJob = {
+  id: string;
+  project_id: string;
+  status: "queued" | "processing" | "completed" | "failed" | "cancelled";
+  stage: string | null;
+  error_message: string | null;
+  model_name: string | null;
+  device: string | null;
+  compute_type: string | null;
+  language: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+
+export type TranscriptResult = {
+  metadata: {
+    project_id: string;
+    source_filename: string;
+    language: string | null;
+    language_probability: number | null;
+    model: string;
+    device: string;
+    compute_type: string;
+    processed_at: string;
+    duration_seconds: number | null;
+  };
+  segments: { start: number; end: number; text: string; words: { start: number; end: number; text: string; probability?: number }[] }[];
+  words: { start: number; end: number; text: string; probability?: number }[];
 };
 
 const API_BASE_URL = "http://127.0.0.1:8765";
@@ -84,6 +120,11 @@ export const getProjects = () => request<Project[]>("/api/projects");
 export const getProject = (id: string) => request<Project>(`/api/projects/${encodeURIComponent(id)}`);
 export const getClips = () => request<Clip[]>("/api/clips");
 export const getJobs = () => request<ProcessingJob[]>("/api/jobs");
+export const getLatestTranscriptionJob = (projectId: string) => request<TranscriptionJob>(`/api/projects/${encodeURIComponent(projectId)}/transcription`);
+export const getTranscriptionJob = (projectId: string, jobId: string) => request<TranscriptionJob>(`/api/projects/${encodeURIComponent(projectId)}/transcription/jobs/${encodeURIComponent(jobId)}`);
+export const startTranscription = (projectId: string, regenerate: boolean) => request<TranscriptionJob>(`/api/projects/${encodeURIComponent(projectId)}/transcription`, { method: "POST", body: JSON.stringify({ regenerate }) });
+export const getTranscript = (projectId: string) => request<TranscriptResult>(`/api/projects/${encodeURIComponent(projectId)}/transcript`);
+export const transcriptDownloadUrl = (projectId: string, format: "txt" | "srt" | "json") => `${API_BASE_URL}/api/projects/${encodeURIComponent(projectId)}/transcript/${format}`;
 export const createProject = (input: {
   name: string;
   description?: string;

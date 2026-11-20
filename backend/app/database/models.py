@@ -50,9 +50,18 @@ class ProcessingJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    job_type: Mapped[str] = mapped_column(String(32), nullable=False, default="generic")
+    stage: Mapped[str | None] = mapped_column(String(40))
+    active_project_id: Mapped[str | None] = mapped_column(String(36), unique=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     progress_percent: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+    model_name: Mapped[str | None] = mapped_column(String(100))
+    device: Mapped[str | None] = mapped_column(String(32))
+    compute_type: Mapped[str | None] = mapped_column(String(32))
+    language: Mapped[str | None] = mapped_column(String(16))
+    started_at: Mapped[datetime | None]
+    completed_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now, nullable=False)
 
@@ -69,6 +78,13 @@ class Transcript(Base):
     text_path: Mapped[str | None] = mapped_column(Text)
     json_path: Mapped[str | None] = mapped_column(Text)
     srt_path: Mapped[str | None] = mapped_column(Text)
+    words_path: Mapped[str | None] = mapped_column(Text)
+    source_filename: Mapped[str | None] = mapped_column(String(500))
+    model_name: Mapped[str | None] = mapped_column(String(100))
+    device: Mapped[str | None] = mapped_column(String(32))
+    compute_type: Mapped[str | None] = mapped_column(String(32))
+    language_probability: Mapped[float | None] = mapped_column(Float)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
 
 

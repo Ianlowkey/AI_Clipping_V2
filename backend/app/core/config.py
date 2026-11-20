@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     max_upload_size_bytes: int = Field(default=20 * 1024 * 1024 * 1024, gt=0)
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
+    whisper_model_size: str = "small"
+    whisper_device: str = "cuda"
+    whisper_compute_type: str = "float16"
+    whisper_language: str | None = None
+    whisper_cpu_fallback: bool = False
+    whisper_audio_chunk_seconds: int = Field(default=600, gt=0)
     api_host: str = "127.0.0.1"
     api_port: int = 8765
 

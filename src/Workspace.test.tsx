@@ -84,4 +84,58 @@ describe("application interface", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
     expect((await screen.findByRole("alert")).textContent).toContain("FFmpeg could not decode this video.");
   });
+
+  it("starts transcription, shows stages and transcript, and exposes downloads", async () => {
+    const transcript = { metadata: { project_id: "p1", source_filename: "source.mp4", language: "en", language_probability: 0.99, model: "small", device: "cpu", processed_at: "2026-01-01T00:00:00Z", duration_seconds: 1 }, segments: [{ start: 0.2, end: 0.8, text: "Hello there.", words: [] }], words: [{ start: 0.2, end: 0.4, text: " Hello" }] };
+    let releaseStart: ((value: Response) => void) | undefined;
+    let statusCalls = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return Promise.resolve(response({ status: "ok", database_ready: true, mode: "local" }));
+      if (url.endsWith("/api/projects") && init?.method === "POST") return Promise.resolve(response(project, 201));
+      if (url.endsWith("/api/projects")) return Promise.resolve(response([project]));
+      if (url.endsWith("/api/clips")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/jobs")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/projects/p1/transcript")) return Promise.resolve(response(transcript));
+      if (url.endsWith("/api/projects/p1/transcription") && init?.method === "POST") return new Promise<Response>(resolve => { releaseStart = resolve; });
+      if (url.endsWith("/api/projects/p1/transcription")) return Promise.resolve(response({ detail: "No previous job" }, 404));
+      if (url.includes("/api/projects/p1/transcription/jobs/")) {
+        statusCalls += 1;
+        const status = statusCalls === 1 ? "processing" : "completed";
+        return Promise.resolve(response({ id: "job1", project_id: "p1", status, stage: status === "completed" ? "completed" : "transcribing", error_message: null, model_name: "small", device: "cpu", language: "en", started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }));
+      }
+      return Promise.resolve(response({ detail: "Not found" }, 404));
+    }));
+
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Test project/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Process Video" }));
+    expect(screen.getByRole("button", { name: "Starting…" }).hasAttribute("disabled")).toBe(true);
+    releaseStart?.(response({ id: "job1", project_id: "p1", status: "queued", stage: "queued", error_message: null, model_name: "small", device: "cuda", language: null, started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }, 202));
+    expect(await screen.findByText("Transcribing audio", {}, { timeout: 4000 })).toBeTruthy();
+    expect(await screen.findByText("Transcription complete", {}, { timeout: 4000 })).toBeTruthy();
+    expect(await screen.findByText("Hello there.", {}, { timeout: 4000 })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Download TXT" }).getAttribute("href")).toContain("/transcript/txt");
+    expect(screen.getByRole("link", { name: "Download SRT" }).getAttribute("href")).toContain("/transcript/srt");
+    expect(screen.getByRole("link", { name: "Download words JSON" }).getAttribute("href")).toContain("/transcript/json");
+  });
+
+  it("shows a useful transcription start error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return response({ status: "ok", database_ready: true, mode: "local" });
+      if (url.endsWith("/api/projects")) return response([project]);
+      if (url.endsWith("/api/clips") || url.endsWith("/api/jobs")) return response([]);
+      if (url.endsWith("/api/projects/p1/transcription") && init?.method === "POST") return response({ detail: "Import and prepare a local video before starting transcription." }, 422);
+      if (url.endsWith("/api/projects/p1/transcription")) return response({ detail: "No previous job" }, 404);
+      if (url.endsWith("/api/projects/p1/transcript")) return response({ detail: "No transcript" }, 404);
+      return response({ detail: "Not found" }, 404);
+    }));
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Test project/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Process Video" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Import and prepare a local video");
+  });
 });

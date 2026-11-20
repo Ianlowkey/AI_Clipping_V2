@@ -6,17 +6,19 @@ import tempfile
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.api_schemas import ClipRead, JobRead, ProjectCreate, ProjectRead
+from app.api_schemas import ClipRead, JobRead, ProjectCreate, ProjectRead, TranscriptionJobRead, TranscriptionStart
 from app.database import session as database
-from app.database.models import Clip, ProcessingJob, Project, SourceVideo
+from app.database.models import Clip, ProcessingJob, Project, SourceVideo, Transcript
 from app.storage import ensure_project_directories, safe_video_filename
 from app.video import VideoPreparationError, prepare_video
+from app.transcription_jobs import get_transcription_job, recover_interrupted_jobs, start_transcription
 
 logger = logging.getLogger(__name__)
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".wmv"}
@@ -25,6 +27,7 @@ ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".m
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.create_database()
+    recover_interrupted_jobs()
     yield
 
 
@@ -206,6 +209,14 @@ def list_jobs():
                 id=job.id,
                 project_id=job.project_id,
                 project_name=job.project.name,
+                job_type=job.job_type,
+                stage=job.stage,
+                model_name=job.model_name,
+                device=job.device,
+                compute_type=job.compute_type,
+                language=job.language,
+                started_at=job.started_at,
+                completed_at=job.completed_at,
                 status=job.status,
                 progress_percent=job.progress_percent,
                 error_message=job.error_message,
@@ -214,3 +225,93 @@ def list_jobs():
             )
             for job in jobs
         ]
+
+
+def _transcription_job_response(job: ProcessingJob) -> TranscriptionJobRead:
+    return TranscriptionJobRead(
+        id=job.id,
+        project_id=job.project_id,
+        status=job.status,
+        stage=job.stage,
+        error_message=job.error_message,
+        model_name=job.model_name,
+        device=job.device,
+        compute_type=job.compute_type,
+        language=job.language,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        updated_at=job.updated_at,
+    )
+
+
+@app.post("/api/projects/{project_id}/transcription", response_model=TranscriptionJobRead, status_code=202)
+def begin_transcription(project_id: str, payload: TranscriptionStart = Body(default=TranscriptionStart())):
+    try:
+        job = start_transcription(project_id, regenerate=payload.regenerate)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _transcription_job_response(job)
+
+
+@app.get("/api/projects/{project_id}/transcription/jobs/{job_id}", response_model=TranscriptionJobRead)
+def read_transcription_job(project_id: str, job_id: str):
+    job = get_transcription_job(project_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Transcription job not found")
+    return _transcription_job_response(job)
+
+
+@app.get("/api/projects/{project_id}/transcription", response_model=TranscriptionJobRead)
+def read_latest_transcription_job(project_id: str):
+    job = get_transcription_job(project_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No transcription job exists for this project")
+    return _transcription_job_response(job)
+
+
+@app.get("/api/projects/{project_id}/transcript")
+def read_transcript(project_id: str):
+    with get_session() as db:
+        project = db.get(Project, project_id)
+        transcript = db.scalar(select(Transcript).where(Transcript.project_id == project_id))
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if transcript is None or not transcript.words_path:
+            raise HTTPException(status_code=404, detail="No completed transcript exists for this project")
+        words_path = Path(transcript.words_path).resolve()
+        allowed_dir = (settings.data_dir / "projects" / project.id / "transcript").resolve()
+        if words_path.parent != allowed_dir or not words_path.is_file():
+            raise HTTPException(status_code=404, detail="Transcript output files are missing")
+        try:
+            payload = json.loads(words_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=500, detail="Transcript data could not be read") from exc
+        return {"metadata": {key: payload.get(key) for key in (
+            "project_id", "source_filename", "language", "language_probability", "model", "device", "compute_type", "processed_at", "duration_seconds"
+        )}, "segments": payload.get("segments", []), "words": payload.get("words", [])}
+
+
+@app.get("/api/projects/{project_id}/transcript/{output_format}")
+def download_transcript(project_id: str, output_format: str):
+    columns = {"txt": "text_path", "srt": "srt_path", "json": "words_path"}
+    if output_format not in columns:
+        raise HTTPException(status_code=404, detail="Transcript format must be txt, srt, or json")
+    with get_session() as db:
+        project = db.get(Project, project_id)
+        transcript = db.scalar(select(Transcript).where(Transcript.project_id == project_id))
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if transcript is None:
+            raise HTTPException(status_code=404, detail="No completed transcript exists for this project")
+        path = Path(getattr(transcript, columns[output_format]) or "").resolve()
+        allowed_dir = (settings.data_dir / "projects" / project.id / "transcript").resolve()
+        if path.parent != allowed_dir or not path.is_file():
+            raise HTTPException(status_code=404, detail="Transcript output file is missing")
+    media_types = {"txt": "text/plain", "srt": "application/x-subrip", "json": "application/json"}
+    return FileResponse(path, media_type=media_types[output_format], filename=f"transcript.{output_format}")

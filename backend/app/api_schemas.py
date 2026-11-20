@@ -61,5 +61,47 @@ class JobRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     project_name: str
+    job_type: str = "generic"
+    stage: str | None = None
+    model_name: str | None = None
+    device: str | None = None
+    compute_type: str | None = None
+    language: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class TranscriptionStart(BaseModel):
+    regenerate: bool = False
+
+
+class TranscriptionJobRead(BaseModel):
+    id: str
+    project_id: str
+    status: str
+    stage: str | None
+    error_message: str | None
+    model_name: str | None
+    device: str | None
+    compute_type: str | None
+    language: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    updated_at: datetime
+
+
+class TranscriptRead(BaseModel):
+    project_id: str
+    source_filename: str | None
+    language: str | None
+    language_probability: float | None
+    model_name: str | None
+    device: str | None
+    duration_seconds: float | None
+    text_path: str | None
+    srt_path: str | None
+    words_path: str | None
+    segment_count: int
+    word_count: int
 
 
