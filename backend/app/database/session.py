@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -24,4 +24,9 @@ def create_database() -> Engine:
     )
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
+    # create_all does not add columns to existing SQLite tables.
+    columns = {column["name"] for column in inspect(engine).get_columns("projects")}
+    if "description" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE projects ADD COLUMN description TEXT"))
     return engine
