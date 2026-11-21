@@ -14,7 +14,9 @@ def test_health_endpoint():
 def test_create_and_list_project(tmp_path, monkeypatch):
     from app.core import config
 
-    monkeypatch.setattr(config.settings, "database_path", tmp_path / "database" / "aiclipping.db")
+    data_dir = tmp_path / "AIClippingData"
+    monkeypatch.setattr(config.settings, "data_dir", data_dir)
+    monkeypatch.setattr(config.settings, "database_path", data_dir / "database" / "aiclipping.db")
     with TestClient(app) as client:
         created = client.post("/api/projects", json={
             "name": "  Demo project  ",
@@ -36,7 +38,9 @@ def test_create_and_list_project(tmp_path, monkeypatch):
 def test_project_creation_rejects_blank_name(tmp_path, monkeypatch):
     from app.core import config
 
-    monkeypatch.setattr(config.settings, "database_path", tmp_path / "database" / "aiclipping.db")
+    data_dir = tmp_path / "AIClippingData"
+    monkeypatch.setattr(config.settings, "data_dir", data_dir)
+    monkeypatch.setattr(config.settings, "database_path", data_dir / "database" / "aiclipping.db")
     with TestClient(app) as client:
         blank = client.post("/api/projects", json={"name": "   "})
     assert blank.status_code == 422

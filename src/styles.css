@@ -156,8 +156,14 @@ h1 { margin: 0; font-size: 28px; letter-spacing: -0.03em; }
 .panel { background:rgba(15,18,27,.72);border:1px solid #202636;border-radius:14px;padding:22px; }
 .panel h2 { margin:0 0 12px; font-size:18px; }
 .project-list { display:grid; }
-.project-row,.job-row { width:100%; display:flex;align-items:center;gap:12px;padding:13px 4px;text-align:left;color:inherit;background:transparent;border:0;border-bottom:1px solid #202636;cursor:pointer; }
-.project-row:last-child { border-bottom:0; }
+.project-row-container { display:flex;align-items:center;gap:10px;border-bottom:1px solid #202636; }
+.project-row,.job-row { width:100%; display:flex;align-items:center;gap:12px;padding:13px 4px;text-align:left;color:inherit;background:transparent;border:0;cursor:pointer; }
+.project-row-container:last-child { border-bottom:0; }
+.danger-button { flex:0 0 auto;min-height:36px;padding:0 11px;color:#ffc0b0;background:#321e20;border:1px solid #70403e;border-radius:8px;font:inherit;font-size:13px;font-weight:650;cursor:pointer; }
+.danger-button:hover { background:#482627; }
+.danger-button:disabled { opacity:.6;cursor:wait; }
+.project-detail-heading { display:flex;align-items:flex-start;justify-content:space-between;gap:16px; }
+.project-detail-heading p { color:#9da6b6; }
 .row-main { display:grid;flex:1;gap:4px;min-width:0; }
 .row-main small,.clip-info small { color:#8e96a7;overflow:hidden;text-overflow:ellipsis; }
 .status-pill { white-space:nowrap;color:#b9c1d0;background:#202636;border-radius:20px;padding:5px 10px;font-size:12px; }

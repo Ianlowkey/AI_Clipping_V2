@@ -1,22 +1,24 @@
 from contextlib import asynccontextmanager
+import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.api_schemas import ClipRead, JobRead, ProjectCreate, ProjectRead, TranscriptionJobRead, TranscriptionStart
 from app.database import session as database
-from app.database.models import Clip, ProcessingJob, Project, SourceVideo, Transcript
-from app.storage import ensure_project_directories, safe_video_filename
+from app.database.models import Clip, ClipMetadata, HighlightCandidate, ProcessingJob, ProcessingLog, Project, SourceVideo, Transcript
+from app.storage import ensure_project_directories, project_directory, project_operation_lock, safe_video_filename
 from app.video import VideoPreparationError, prepare_video
 from app.transcription_jobs import get_transcription_job, recover_interrupted_jobs, start_transcription
 
@@ -27,6 +29,7 @@ ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".m
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.create_database()
+    recover_project_deletion_staging()
     recover_interrupted_jobs()
     yield
 
@@ -37,6 +40,38 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+def recover_project_deletion_staging() -> None:
+    """Restore or finish only app-created deletion staging folders after a crash."""
+    projects_root = (settings.data_dir / "projects").resolve()
+    if not projects_root.is_dir() or database.SessionLocal is None:
+        return
+    for staged_dir in projects_root.glob(".deleting-*"):
+        if staged_dir.is_symlink() or not staged_dir.is_dir() or staged_dir.resolve().parent != projects_root:
+            continue
+        suffix = staged_dir.name[len(".deleting-"):]
+        project_id = suffix[:36]
+        nonce = suffix[37:] if len(suffix) > 37 and suffix[36] == "-" else ""
+        try:
+            if str(UUID(project_id)) != project_id or len(nonce) != 32 or any(char not in "0123456789abcdef" for char in nonce):
+                continue
+        except ValueError:
+            continue
+        with database.SessionLocal() as db:
+            project_exists = db.get(Project, project_id) is not None
+        expected_dir = projects_root / project_id
+        try:
+            if project_exists and not expected_dir.exists():
+                os.replace(staged_dir, expected_dir)
+                logger.warning("Restored project storage after interrupted deletion: %s", project_id)
+            elif not project_exists:
+                shutil.rmtree(staged_dir)
+                logger.info("Finished staged file cleanup after interrupted project deletion: %s", project_id)
+            else:
+                logger.error("Project deletion staging conflicts with an existing project folder: %s", project_id)
+        except OSError:
+            logger.exception("Could not recover staged project deletion for %s", project_id)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -46,7 +81,7 @@ app.add_middleware(
         "http://localhost:1420",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "HEAD", "POST"],
+    allow_methods=["GET", "HEAD", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -87,6 +122,89 @@ def get_project(project_id: str):
         return project
 
 
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str):
+    try:
+        expected_id = str(UUID(project_id))
+        project_dir = project_directory(expected_id)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Project identifier is invalid") from exc
+
+    projects_root = (settings.data_dir / "projects").resolve()
+    expected_dir = projects_root / expected_id
+    if project_dir != expected_dir or expected_dir.is_symlink():
+        raise HTTPException(status_code=400, detail="Project storage path is not a safe child of the projects directory")
+    tombstone = projects_root / f".deleting-{expected_id}-{uuid4().hex}"
+    moved = False
+
+    # The same per-project lock protects uploads in this API process. SQLite's
+    # transaction and active-job check additionally protect transcription jobs.
+    with project_operation_lock(expected_id):
+        try:
+            with get_session() as db:
+                with db.begin():
+                    project = db.get(Project, expected_id)
+                    if project is None:
+                        raise HTTPException(status_code=404, detail="Project not found")
+                    active_job = db.scalar(select(ProcessingJob.id).where(
+                        ProcessingJob.project_id == expected_id,
+                        or_(ProcessingJob.status.in_(("queued", "processing")), ProcessingJob.active_project_id == expected_id),
+                    ).limit(1))
+                    if active_job:
+                        raise HTTPException(status_code=409, detail="This project has an active processing job. Wait for it to finish before deleting the project.")
+
+                    if project_dir.exists():
+                        if not project_dir.is_dir():
+                            raise HTTPException(status_code=400, detail="Project storage path is not a directory")
+                        project.status = "deleting"
+                        db.flush()
+                        os.replace(project_dir, tombstone)
+                        moved = True
+
+                    job_ids = select(ProcessingJob.id).where(ProcessingJob.project_id == expected_id)
+                    clip_ids = select(Clip.id).where(Clip.project_id == expected_id)
+                    db.execute(delete(ProcessingLog).where(ProcessingLog.job_id.in_(job_ids)))
+                    db.execute(delete(ProcessingJob).where(ProcessingJob.project_id == expected_id))
+                    db.execute(delete(ClipMetadata).where(ClipMetadata.clip_id.in_(clip_ids)))
+                    db.execute(delete(Clip).where(Clip.project_id == expected_id))
+                    db.execute(delete(HighlightCandidate).where(HighlightCandidate.project_id == expected_id))
+                    db.execute(delete(SourceVideo).where(SourceVideo.project_id == expected_id))
+                    db.execute(delete(Transcript).where(Transcript.project_id == expected_id))
+                    db.delete(project)
+        except HTTPException:
+            if moved:
+                try:
+                    os.replace(tombstone, project_dir)
+                except OSError:
+                    logger.exception("Could not restore project storage after deletion was cancelled for %s", expected_id)
+            raise
+        except OSError as exc:
+            if moved:
+                try:
+                    os.replace(tombstone, project_dir)
+                except OSError:
+                    logger.exception("Could not restore project storage after deletion failed for %s", expected_id)
+            logger.exception("Filesystem operation failed while deleting project %s", expected_id)
+            raise HTTPException(status_code=500, detail="Project files could not be safely staged for deletion. The project was kept; check local logs.") from exc
+        except Exception as exc:
+            if moved:
+                try:
+                    os.replace(tombstone, project_dir)
+                except OSError:
+                    logger.exception("Could not restore project storage after database deletion failed for %s", expected_id)
+            logger.exception("Database operation failed while deleting project %s", expected_id)
+            raise HTTPException(status_code=500, detail="Project deletion failed. The project was kept where possible; check local logs.") from exc
+
+        cleanup_pending = False
+        if moved:
+            try:
+                shutil.rmtree(tombstone)
+            except OSError:
+                cleanup_pending = True
+                logger.exception("Project %s was removed from the database, but staged file cleanup is pending", expected_id)
+        return {"deleted": True, "cleanup_pending": cleanup_pending}
+
+
 @app.post("/api/projects", response_model=ProjectRead, status_code=201)
 def create_project(payload: ProjectCreate):
     if payload.video_url and not payload.video_url.startswith(("http://", "https://")):
@@ -113,6 +231,15 @@ def create_project(payload: ProjectCreate):
 
 @app.post("/api/projects/{project_id}/source-video", status_code=201)
 async def upload_source_video(project_id: str, file: UploadFile = File(...)):
+    lock = project_operation_lock(project_id)
+    await asyncio.to_thread(lock.acquire)
+    try:
+        return await _upload_source_video_locked(project_id, file)
+    finally:
+        lock.release()
+
+
+async def _upload_source_video_locked(project_id: str, file: UploadFile):
     if not file.filename or not file.filename.strip():
         raise HTTPException(status_code=422, detail="Choose a video file to upload.")
     extension = Path(file.filename.replace("\\", "/").split("/")[-1]).suffix.lower()

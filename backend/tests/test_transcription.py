@@ -25,16 +25,17 @@ def fake_model():
     return Model()
 
 
-def fake_audio_chunks(_source, work_dir):
+def fake_audio_chunks(_source, work_dir, source_offset_seconds=0.0):
     path = work_dir / "audio_00000.flac"
     path.write_bytes(b"audio")
-    return [(path, 1.0)]
+    return [transcription.AudioChunk(path, 1.0, source_offset_seconds)]
 
 
 def test_transcription_writes_txt_srt_and_word_json(tmp_path, monkeypatch):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"mock video")
     monkeypatch.setattr(transcription, "prepare_video", lambda _: {"audio_available": True, "duration_seconds": 1.0})
+    monkeypatch.setattr(transcription, "_source_audio_offset", lambda *_: 0.0)
     monkeypatch.setattr(transcription, "_extract_audio_chunks", fake_audio_chunks)
     monkeypatch.setattr(transcription, "load_model", lambda *args: fake_model())
     monkeypatch.setattr(transcription.settings, "whisper_device", "cpu")
@@ -63,6 +64,7 @@ def test_no_audio_and_model_failures_are_actionable(tmp_path, monkeypatch):
         transcription.transcribe_video(source, "p", "source.mp4", tmp_path, lambda *_: None)
 
     monkeypatch.setattr(transcription, "prepare_video", lambda _: {"audio_available": True, "duration_seconds": 1})
+    monkeypatch.setattr(transcription, "_source_audio_offset", lambda *_: 0.0)
     monkeypatch.setattr(transcription, "_extract_audio_chunks", fake_audio_chunks)
     monkeypatch.setattr(transcription, "load_model", lambda *args: (_ for _ in ()).throw(transcription.TranscriptionError("model unavailable")))
     monkeypatch.setattr(transcription.settings, "whisper_device", "cpu")
@@ -74,6 +76,7 @@ def test_explicit_cuda_cpu_fallback_reports_actual_device(tmp_path, monkeypatch)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"mock video")
     monkeypatch.setattr(transcription, "prepare_video", lambda _: {"audio_available": True, "duration_seconds": 1})
+    monkeypatch.setattr(transcription, "_source_audio_offset", lambda *_: 0.0)
     monkeypatch.setattr(transcription, "_extract_audio_chunks", fake_audio_chunks)
     monkeypatch.setattr(transcription.settings, "whisper_device", "cuda")
     monkeypatch.setattr(transcription.settings, "whisper_compute_type", "float16")

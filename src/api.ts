@@ -118,6 +118,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const getProjects = () => request<Project[]>("/api/projects");
 export const getProject = (id: string) => request<Project>(`/api/projects/${encodeURIComponent(id)}`);
+export const deleteProject = (id: string) => request<{ deleted: boolean; cleanup_pending: boolean }>(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const getClips = () => request<Clip[]>("/api/clips");
 export const getJobs = () => request<ProcessingJob[]>("/api/jobs");
 export const getLatestTranscriptionJob = (projectId: string) => request<TranscriptionJob>(`/api/projects/${encodeURIComponent(projectId)}/transcription`);

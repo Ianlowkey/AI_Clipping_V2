@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import wave
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -24,6 +26,13 @@ class TranscriptionError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class AudioChunk:
+    path: Path
+    duration_seconds: float
+    source_offset_seconds: float
+
+
 def load_model(model_size: str, device: str, compute_type: str):
     global _cached_model, _cached_key
     key = (model_size, device, compute_type)
@@ -34,12 +43,36 @@ def load_model(model_size: str, device: str, compute_type: str):
         _cached_key = None
         gc.collect()
         try:
+            _configure_pyav_open_compatibility()
             from faster_whisper import WhisperModel
             _cached_model = WhisperModel(model_size, device=device, compute_type=compute_type)
             _cached_key = key
             return _cached_model
         except Exception as exc:
             raise TranscriptionError(_model_error(exc, device)) from exc
+
+
+def _configure_pyav_open_compatibility() -> None:
+    """Bridge Faster-Whisper 1.2.1's removed PyAV 19 keyword without security changes."""
+    try:
+        import av
+    except ImportError:
+        return
+    try:
+        pyav_major = int(av.__version__.split(".", 1)[0])
+    except (AttributeError, ValueError):
+        return
+    if pyav_major < 19 or getattr(av.open, "_aiclipping_pyav19_compat", False):
+        return
+
+    original_open = av.open
+
+    def compatible_open(file, *args, **kwargs):
+        kwargs.pop("metadata_errors", None)
+        return original_open(file, *args, **kwargs)
+
+    compatible_open._aiclipping_pyav19_compat = True
+    av.open = compatible_open
 
 
 def _model_error(error: Exception, device: str) -> str:
@@ -121,40 +154,124 @@ def _write_outputs(transcript_dir: Path, payload: dict) -> dict[str, str]:
         shutil.rmtree(stage_dir, ignore_errors=True)
 
 
-def _extract_audio_chunks(source_path: Path, work_dir: Path) -> list[tuple[Path, float]]:
+def _diagnostic_text(text: str, *paths: Path) -> str:
+    for path in paths:
+        text = text.replace(str(path), "<local-file>")
+    return text.strip()[:1200]
+
+
+def _source_audio_offset(source_path: Path, ffprobe: str | None) -> float:
+    if not ffprobe:
+        raise TranscriptionError("FFprobe is required to inspect source audio timestamps.")
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=start_time:stream=codec_type,start_time", "-of", "json", str(source_path)],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("FFprobe source timeline inspection failed (%s)", type(exc).__name__)
+        raise TranscriptionError("FFprobe could not inspect the video's audio start time. Check FFprobe and retry.") from exc
+    if result.returncode != 0:
+        logger.warning("Source timeline probe failed (exit=%s): %s", result.returncode, _diagnostic_text(result.stderr, source_path))
+        raise TranscriptionError("FFprobe could not inspect the video's audio start time. Check the local backend logs.")
+    try:
+        report = json.loads(result.stdout)
+        streams = report.get("streams", [])
+        audio = next(stream for stream in streams if stream.get("codec_type") == "audio")
+        video = next(stream for stream in streams if stream.get("codec_type") == "video")
+        raw_container_start = report.get("format", {}).get("start_time")
+        container_start = float(raw_container_start) if raw_container_start not in (None, "N/A", "") else 0.0
+        raw_video_start = video.get("start_time")
+        video_start = float(raw_video_start) if raw_video_start not in (None, "N/A", "") else container_start
+        raw_audio_start = audio.get("start_time")
+        audio_start = float(raw_audio_start) if raw_audio_start not in (None, "N/A", "") else video_start
+        offset = audio_start - video_start
+    except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Source timeline probe returned unusable timestamps (exit=%s)", result.returncode)
+        raise TranscriptionError("FFprobe did not return usable audio and video start timestamps; safe transcript alignment is unavailable.") from exc
+    if not math.isfinite(offset):
+        raise TranscriptionError("FFprobe returned a non-finite audio start timestamp; safe transcript alignment is unavailable.")
+    logger.info("Source audio timeline inspected: video-relative audio start offset=%.6fs", offset)
+    return offset
+
+
+def _extract_audio_chunks(source_path: Path, work_dir: Path, source_offset_seconds: float = 0.0) -> list[AudioChunk]:
     ffmpeg, ffprobe = settings.resolve_ffmpeg(), settings.resolve_ffprobe()
     if not ffmpeg or not ffprobe:
         raise TranscriptionError("FFmpeg and FFprobe are required to prepare transcription audio.")
-    pattern = work_dir / "audio_%05d.flac"
+    requested_duration = settings.whisper_audio_chunk_seconds
+    pattern = work_dir / "audio_%05d.wav"
+    effective_offset = source_offset_seconds
+    trim_before_video = max(0.0, -source_offset_seconds)
+    extraction_args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(source_path), "-map", "0:a:0", "-vn"]
+    if trim_before_video:
+        extraction_args.extend(["-af", f"atrim=start={trim_before_video:.9f},asetpts=PTS-STARTPTS"])
+        effective_offset = 0.0
+    extraction_args.extend([
+        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "segment", "-segment_time", str(requested_duration),
+        "-reset_timestamps", "1", str(pattern),
+    ])
     try:
         result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(source_path), "-map", "0:a:0", "-vn",
-             "-f", "segment", "-segment_time", str(settings.whisper_audio_chunk_seconds), "-reset_timestamps", "1",
-             "-c:a", "flac", str(pattern)],
+            extraction_args,
             capture_output=True, text=True, timeout=24 * 60 * 60, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.exception("FFmpeg audio preparation failed")
+        logger.warning("FFmpeg audio preparation failed (%s)", type(exc).__name__)
         raise TranscriptionError("FFmpeg could not prepare the audio. Check FFmpeg and available disk space.") from exc
     if result.returncode:
-        logger.warning("FFmpeg audio extraction failed (exit %s)", result.returncode)
+        logger.warning("FFmpeg audio extraction failed (exit=%s, requested_chunk_duration=%ss): %s", result.returncode, requested_duration, _diagnostic_text(result.stderr, source_path, work_dir))
         raise TranscriptionError("FFmpeg could not extract audio from this video. The audio may be corrupt or unsupported.")
-    paths = sorted(work_dir.glob("audio_*.flac"))
+    paths = sorted(work_dir.glob("audio_*.wav"))
     if not paths:
-        raise TranscriptionError("No audio could be extracted from this video.")
+        logger.warning("FFmpeg exited successfully but created no audio chunks (exit=0, requested_chunk_duration=%ss)", requested_duration)
+        raise TranscriptionError("FFmpeg completed without creating audio chunks. Check the source audio stream and backend logs.")
     chunks = []
-    for path in paths:
+    offset = effective_offset
+    for index, path in enumerate(paths, start=1):
+        probe = None
+        file_size = path.stat().st_size
+        logger.info("Audio chunk extracted: index=%s source_offset=%.6fs requested_chunk_duration=%ss file_size=%s ffmpeg_exit=0", index, offset, requested_duration, file_size)
+        if file_size < 45:
+            logger.warning("Audio chunk is empty or too short: index=%s source_offset=%.6fs requested_chunk_duration=%ss file_size=%s", index, offset, requested_duration, file_size)
+            raise TranscriptionError(f"Extracted audio chunk {index} is empty. Check the source audio and local backend logs.")
         try:
+            with wave.open(str(path), "rb") as audio:
+                frame_count = audio.getnframes()
+                sample_rate = audio.getframerate()
+                channels = audio.getnchannels()
+                sample_width = audio.getsampwidth()
+                compression = audio.getcomptype()
+                if compression != "NONE" or sample_rate != 16000 or channels != 1 or sample_width != 2 or frame_count <= 0:
+                    raise ValueError("unexpected PCM WAV format or empty sample data")
+                expected_payload_bytes = frame_count * channels * sample_width
+                if file_size < expected_payload_bytes + 44 or not audio.readframes(1):
+                    raise ValueError("WAV sample data is incomplete")
+                duration = frame_count / sample_rate
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("invalid sample duration")
             probe = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_name,sample_rate,channels", "-of", "json", str(path)],
                 capture_output=True, text=True, timeout=30, check=False,
             )
-            duration = float(probe.stdout.strip())
-            if probe.returncode != 0 or not math.isfinite(duration) or duration <= 0:
-                raise ValueError("invalid chunk duration")
-        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-            raise TranscriptionError("FFprobe could not measure an extracted audio chunk, so transcript timestamps cannot be aligned safely.") from exc
-        chunks.append((path, duration))
+            if probe.returncode != 0:
+                logger.warning("FFprobe rejected audio chunk: index=%s source_offset=%.6fs requested_chunk_duration=%ss file_size=%s ffprobe_exit=%s stdout=%s stderr=%s", index, offset, requested_duration, file_size, probe.returncode, _diagnostic_text(probe.stdout, path, work_dir), _diagnostic_text(probe.stderr, path, work_dir))
+                raise TranscriptionError(f"FFprobe could not validate extracted audio chunk {index} (exit {probe.returncode}). Check the local backend logs.")
+            report = json.loads(probe.stdout)
+            streams = report.get("streams", [])
+            stream = next((item for item in streams if item.get("codec_type") == "audio"), streams[0] if streams else {})
+            probed_duration = float(report.get("format", {}).get("duration", "nan"))
+            if stream.get("codec_name") != "pcm_s16le" or int(stream.get("sample_rate", 0)) != sample_rate or int(stream.get("channels", 0)) != channels:
+                raise ValueError("FFprobe reported an unexpected WAV audio stream")
+            if not math.isfinite(probed_duration) or abs(probed_duration - duration) > (1 / sample_rate) + 0.001:
+                raise ValueError("FFprobe duration did not match the WAV sample count")
+        except TranscriptionError:
+            raise
+        except (OSError, EOFError, wave.Error, TypeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Audio chunk validation failed: index=%s source_offset=%.6fs requested_chunk_duration=%ss file_size=%s ffprobe_exit=%s stdout=%s stderr=%s reason=%s", index, offset, requested_duration, file_size, probe.returncode if probe else "not-run", _diagnostic_text(probe.stdout, path, work_dir) if probe else "", _diagnostic_text(probe.stderr, path, work_dir) if probe else "", exc)
+            raise TranscriptionError(f"Extracted audio chunk {index} is incomplete or has invalid duration metadata. Check the local backend logs.") from exc
+        chunks.append(AudioChunk(path, duration, offset))
+        offset += duration
     return chunks
 
 
@@ -181,7 +298,8 @@ def transcribe_video(
     temp_root.mkdir(parents=True, exist_ok=True)
     audio_work_dir = Path(tempfile.mkdtemp(prefix="transcription-audio-", dir=temp_root))
     try:
-        chunks = _extract_audio_chunks(source_path, audio_work_dir)
+        source_offset = _source_audio_offset(source_path, settings.resolve_ffprobe())
+        chunks = _extract_audio_chunks(source_path, audio_work_dir, source_offset)
         return _transcribe_chunks(
             chunks, project_id, source_filename, transcript_dir, stage_callback,
             model_size=model_size, language=language,
@@ -192,7 +310,7 @@ def transcribe_video(
 
 
 def _transcribe_chunks(
-    chunks: list[tuple[Path, float]],
+    chunks: list[AudioChunk],
     project_id: str,
     source_filename: str,
     transcript_dir: Path,
@@ -222,25 +340,23 @@ def _transcribe_chunks(
         output_segments: list[dict] = []
         output_words: list[dict] = []
         detected_info = None
-        offset = 0.0
-        for index, (chunk_path, chunk_duration) in enumerate(chunks, start=1):
+        for index, chunk in enumerate(chunks, start=1):
             stage_callback("transcribing", f"Transcribing audio part {index} of {len(chunks)} with {chosen_model} on {active_device}", active_device)
             iterator, info = active_model.transcribe(
-                str(chunk_path), language=active_language, word_timestamps=True, vad_filter=True,
+                str(chunk.path), language=active_language, word_timestamps=True, vad_filter=True,
             )
             normal_segments, normal_words = _normalise(list(iterator))
             for segment in normal_segments:
-                segment["start"] += offset
-                segment["end"] += offset
+                segment["start"] += chunk.source_offset_seconds
+                segment["end"] += chunk.source_offset_seconds
                 for word in segment["words"]:
-                    word["start"] += offset
-                    word["end"] += offset
+                    word["start"] += chunk.source_offset_seconds
+                    word["end"] += chunk.source_offset_seconds
                 output_segments.append(segment)
             output_words.extend(word for segment in normal_segments for word in segment["words"])
             detected_info = info
             if active_language is None:
                 active_language = getattr(info, "language", None)
-            offset += chunk_duration
         return output_segments, output_words, detected_info
 
     try:

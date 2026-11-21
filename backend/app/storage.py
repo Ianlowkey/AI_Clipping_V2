@@ -1,4 +1,5 @@
 import re
+import threading
 from pathlib import Path
 from uuid import UUID
 
@@ -7,6 +8,15 @@ from app.core.config import settings
 PROJECT_DIRECTORIES = (
     "source", "transcript", "candidates", "clips", "metadata", "exports", "downloads", "logs", "temp",
 )
+
+_project_locks_guard = threading.Lock()
+_project_locks: dict[str, threading.Lock] = {}
+
+
+def project_operation_lock(project_id: str) -> threading.Lock:
+    """Serialize file writes and project deletion within the local API process."""
+    with _project_locks_guard:
+        return _project_locks.setdefault(project_id, threading.Lock())
 
 
 def project_directory(project_id: str) -> Path:
