@@ -58,6 +58,16 @@ def create_database() -> Engine:
         "completed_at": "DATETIME",
     }
     transcript_columns = {column["name"] for column in inspect(engine).get_columns("transcripts")}
+    candidate_columns = {column["name"] for column in inspect(engine).get_columns("highlight_candidates")}
+    candidate_migrations = {
+        "analysis_job_id": "VARCHAR(36)", "transcript_id": "VARCHAR(36)", "duration_seconds": "FLOAT",
+        "excerpt": "TEXT", "title": "VARCHAR(300)", "hook": "TEXT", "category": "VARCHAR(40)",
+        "selection_explanation": "TEXT", "hook_strength": "INTEGER", "engagement_potential": "INTEGER",
+        "standalone_clarity": "INTEGER", "emotional_value": "INTEGER",
+        "review_status": "VARCHAR(20) NOT NULL DEFAULT 'suggested'", "validation_warnings": "TEXT",
+        "selected_for_render": "BOOLEAN NOT NULL DEFAULT 0",
+        "created_at": "DATETIME",
+    }
     transcript_migrations = {
         "words_path": "TEXT",
         "source_filename": "VARCHAR(500)",
@@ -74,6 +84,12 @@ def create_database() -> Engine:
         for name, column_type in transcript_migrations.items():
             if name not in transcript_columns:
                 connection.execute(text(f"ALTER TABLE transcripts ADD COLUMN {name} {column_type}"))
+        for name, column_type in candidate_migrations.items():
+            if name not in candidate_columns:
+                connection.execute(text(f"ALTER TABLE highlight_candidates ADD COLUMN {name} {column_type}"))
+        connection.execute(text("UPDATE highlight_candidates SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_highlight_candidates_analysis_job_id ON highlight_candidates(analysis_job_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_highlight_candidates_transcript_id ON highlight_candidates(transcript_id)"))
         connection.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_processing_active_transcription "
             "ON processing_jobs(active_project_id) WHERE active_project_id IS NOT NULL"

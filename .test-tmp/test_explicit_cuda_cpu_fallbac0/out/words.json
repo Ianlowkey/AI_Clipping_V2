@@ -1,0 +1,46 @@
+{
+  "project_id": "p",
+  "source_filename": "source.mp4",
+  "language": "en",
+  "language_probability": 0.99,
+  "model": "small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "processed_at": "2026-11-22T07:21:34.543724+00:00",
+  "duration_seconds": 1,
+  "segments": [
+    {
+      "start": 0.12,
+      "end": 0.9,
+      "text": "Hello world.",
+      "words": [
+        {
+          "start": 0.12,
+          "end": 0.4,
+          "text": " Hello",
+          "probability": 0.98
+        },
+        {
+          "start": 0.41,
+          "end": 0.9,
+          "text": " world.",
+          "probability": 0.93
+        }
+      ]
+    }
+  ],
+  "words": [
+    {
+      "start": 0.12,
+      "end": 0.4,
+      "text": " Hello",
+      "probability": 0.98
+    },
+    {
+      "start": 0.41,
+      "end": 0.9,
+      "text": " world.",
+      "probability": 0.93
+    }
+  ]
+}

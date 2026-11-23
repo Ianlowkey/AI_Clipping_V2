@@ -125,6 +125,7 @@ def setup_client(tmp_path, monkeypatch, *, with_source=True):
 
 
 def test_transcription_api_status_and_duplicate_prevention(tmp_path, monkeypatch):
+    from sqlalchemy import select
     client, project_id = setup_client(tmp_path, monkeypatch)
     import threading
     started = threading.Event()
@@ -175,6 +176,17 @@ def test_transcription_api_status_and_duplicate_prevention(tmp_path, monkeypatch
         time.sleep(0.05)
     assert status.json()["status"] == "completed"
     assert client.get(f"/api/projects/{project_id}/transcript/txt").text == "mock-2"
+    assert client.get(f"/api/projects/{project_id}/transcript/json").headers["content-disposition"].endswith('filename="words.json"')
+    folder = client.get(f"/api/projects/{project_id}/transcript-folder")
+    assert folder.status_code == 200 and Path(folder.json()["path"]).is_dir()
+    from app.database import session as database
+    from app.database.models import Transcript
+    with database.SessionLocal() as db:
+        record = db.scalar(select(Transcript).where(Transcript.project_id == project_id))
+        missing_path = Path(record.srt_path)
+        missing_path.unlink()
+    assert client.get(f"/api/projects/{project_id}/transcript/srt").status_code == 404
+    assert client.get(f"/api/projects/{project_id}/transcript").status_code == 404
     client.__exit__(None, None, None)
 
 
@@ -210,4 +222,22 @@ def test_missing_source_file_and_worker_failure_are_reported(tmp_path, monkeypat
         time.sleep(0.05)
     assert current["status"] == "failed"
     assert current["error_message"] == "The video has no audio stream."
+    retry = client.post(f"/api/projects/{project_id}/transcription", json={})
+    assert retry.status_code == 202
+    for _ in range(30):
+        current = client.get(f"/api/projects/{project_id}/transcription/jobs/{retry.json()['id']}").json()
+        if current["status"] == "failed":
+            break
+        time.sleep(0.05)
+    assert current["status"] == "failed"
     client.__exit__(None, None, None)
+
+
+def test_windows_launcher_sets_cpu_and_sqlalchemy_defaults_process_locally():
+    script = Path(__file__).resolve().parents[2] / "start-aiclipping.ps1"
+    source = script.read_text(encoding="utf-8")
+    assert 'DISABLE_SQLALCHEMY_CEXT_RUNTIME = "1"' in source
+    assert 'AICLIPPING_WHISPER_DEVICE = "cpu"' in source
+    assert 'AICLIPPING_WHISPER_COMPUTE_TYPE = "int8"' in source
+    assert 'if ($null -eq $current)' in source
+    assert 'SetEnvironmentVariable($name, $originalBackendEnvironment[$name], "Process")' in source

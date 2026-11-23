@@ -98,6 +98,22 @@ class HighlightCandidate(Base):
     score: Mapped[float] = mapped_column(Float, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text)
     approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    analysis_job_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    transcript_id: Mapped[str | None] = mapped_column(ForeignKey("transcripts.id", ondelete="SET NULL"), index=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    excerpt: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(String(300))
+    hook: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(String(40))
+    selection_explanation: Mapped[str | None] = mapped_column(Text)
+    hook_strength: Mapped[int | None] = mapped_column(Integer)
+    engagement_potential: Mapped[int | None] = mapped_column(Integer)
+    standalone_clarity: Mapped[int | None] = mapped_column(Integer)
+    emotional_value: Mapped[int | None] = mapped_column(Integer)
+    review_status: Mapped[str] = mapped_column(String(20), default="suggested", nullable=False)
+    selected_for_render: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    validation_warnings: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
 
 
 class Clip(Base):

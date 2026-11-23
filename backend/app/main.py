@@ -15,12 +15,14 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.api_schemas import ClipRead, JobRead, ProjectCreate, ProjectRead, TranscriptionJobRead, TranscriptionStart
+from app.api_schemas import (CandidateEdit, CandidateRead, CandidateReview, CandidateSelection, ClipRead, GeminiSettingsRead,
+    HighlightJobRead, JobRead, ProjectCreate, ProjectRead, TranscriptionJobRead, TranscriptionStart)
 from app.database import session as database
 from app.database.models import Clip, ClipMetadata, HighlightCandidate, ProcessingJob, ProcessingLog, Project, SourceVideo, Transcript
 from app.storage import ensure_project_directories, project_directory, project_operation_lock, safe_video_filename
 from app.video import VideoPreparationError, prepare_video
 from app.transcription_jobs import get_transcription_job, recover_interrupted_jobs, start_transcription
+from app import highlight_detection
 
 logger = logging.getLogger(__name__)
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".wmv"}
@@ -31,6 +33,7 @@ async def lifespan(_: FastAPI):
     database.create_database()
     recover_project_deletion_staging()
     recover_interrupted_jobs()
+    highlight_detection.recover_interrupted_jobs()
     yield
 
 
@@ -239,6 +242,31 @@ async def upload_source_video(project_id: str, file: UploadFile = File(...)):
         lock.release()
 
 
+@app.get("/api/projects/{project_id}/source-video/preview")
+def preview_source_video(project_id: str):
+    """Stream only the validated source file recorded for this project."""
+    with get_session() as db:
+        project = db.get(Project, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        source = db.scalar(select(SourceVideo).where(
+            SourceVideo.project_id == project_id,
+            SourceVideo.source_type == "local_file",
+        ).order_by(SourceVideo.created_at.desc()))
+        if source is None or not source.local_path:
+            raise HTTPException(status_code=404, detail="No local source video is available for preview")
+        try:
+            project_dir = project_directory(project_id).resolve(strict=True)
+            allowed_directory = (project_dir / "source").resolve(strict=True)
+            path = Path(source.local_path).resolve(strict=True)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="The source video is unavailable")
+        if allowed_directory.parent != project_dir or path.parent != allowed_directory or not path.is_file():
+            raise HTTPException(status_code=404, detail="The source video is unavailable")
+        filename = path.name
+    return FileResponse(path, filename=filename, content_disposition_type="inline")
+
+
 async def _upload_source_video_locked(project_id: str, file: UploadFile):
     if not file.filename or not file.filename.strip():
         raise HTTPException(status_code=422, detail="Choose a video file to upload.")
@@ -354,6 +382,110 @@ def list_jobs():
         ]
 
 
+@app.get("/api/settings/gemini", response_model=GeminiSettingsRead)
+def gemini_settings():
+    return GeminiSettingsRead(configured=bool(settings.gemini_api_key), model=settings.gemini_model)
+
+
+def _highlight_job_read(job: ProcessingJob) -> HighlightJobRead:
+    return HighlightJobRead(id=job.id, project_id=job.project_id, status=job.status, stage=job.stage,
+        error_message=job.error_message, model_name=job.model_name, started_at=job.started_at,
+        completed_at=job.completed_at, updated_at=job.updated_at)
+
+
+@app.post("/api/projects/{project_id}/highlights", response_model=HighlightJobRead, status_code=202)
+def begin_highlight_analysis(project_id: str):
+    try:
+        return _highlight_job_read(highlight_detection.start_analysis(project_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except highlight_detection.HighlightError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/highlights/jobs/latest", response_model=HighlightJobRead)
+def latest_highlight_job(project_id: str):
+    job = highlight_detection.get_job(project_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No highlight analysis exists for this project")
+    return _highlight_job_read(job)
+
+
+@app.get("/api/projects/{project_id}/highlights/jobs/{job_id}", response_model=HighlightJobRead)
+def read_highlight_job(project_id: str, job_id: str):
+    job = highlight_detection.get_job(project_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Highlight analysis job not found")
+    return _highlight_job_read(job)
+
+
+@app.get("/api/projects/{project_id}/highlights/candidates", response_model=list[CandidateRead])
+def read_highlight_candidates(project_id: str):
+    with get_session() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+    return highlight_detection.list_candidates(project_id)
+
+
+@app.get("/api/projects/{project_id}/highlights/candidates/{candidate_id}", response_model=CandidateRead)
+def read_highlight_candidate(project_id: str, candidate_id: str):
+    candidate = highlight_detection.list_candidates(project_id)
+    result = next((item for item in candidate if item.id == candidate_id), None)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Highlight candidate not found")
+    return result
+
+
+@app.patch("/api/projects/{project_id}/highlights/candidates/{candidate_id}", response_model=CandidateRead)
+def update_highlight_candidate(project_id: str, candidate_id: str, payload: CandidateEdit):
+    try:
+        with get_session() as db:
+            candidate = db.get(HighlightCandidate, candidate_id)
+            if candidate is None or candidate.project_id != project_id:
+                raise LookupError("Highlight candidate not found")
+        return highlight_detection.edit_candidate(candidate_id, payload.start_seconds, payload.end_seconds,
+            payload.title, payload.hook)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.patch("/api/projects/{project_id}/highlights/candidates/{candidate_id}/review", response_model=CandidateRead)
+def review_highlight_candidate(project_id: str, candidate_id: str, payload: CandidateReview):
+    with get_session() as db:
+        candidate = db.get(HighlightCandidate, candidate_id)
+        if candidate is None or candidate.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Highlight candidate not found")
+        candidate.review_status = payload.status
+        candidate.approved = payload.status == "approved"
+        if payload.status == "rejected":
+            candidate.selected_for_render = False
+        db.commit()
+        db.refresh(candidate)
+        return candidate
+
+
+@app.patch("/api/projects/{project_id}/highlights/candidates/{candidate_id}/selection", response_model=CandidateRead)
+def select_highlight_candidate(project_id: str, candidate_id: str, payload: CandidateSelection):
+    with get_session() as db:
+        candidate = db.get(HighlightCandidate, candidate_id)
+        if candidate is None or candidate.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Highlight candidate not found")
+        if payload.selected and (not candidate.approved or candidate.review_status != "approved"):
+            raise HTTPException(status_code=409, detail="Only approved candidates can be selected for rendering")
+        candidate.selected_for_render = payload.selected
+        db.commit()
+        db.refresh(candidate)
+        return candidate
+
+
 def _transcription_job_response(job: ProcessingJob) -> TranscriptionJobRead:
     return TranscriptionJobRead(
         id=job.id,
@@ -413,7 +545,8 @@ def read_transcript(project_id: str):
             raise HTTPException(status_code=404, detail="No completed transcript exists for this project")
         words_path = Path(transcript.words_path).resolve()
         allowed_dir = (settings.data_dir / "projects" / project.id / "transcript").resolve()
-        if words_path.parent != allowed_dir or not words_path.is_file():
+        output_paths = [Path(value or "").resolve() for value in (transcript.text_path, transcript.srt_path, transcript.words_path)]
+        if any(path.parent != allowed_dir or not path.is_file() for path in output_paths) or words_path.parent != allowed_dir:
             raise HTTPException(status_code=404, detail="Transcript output files are missing")
         try:
             payload = json.loads(words_path.read_text(encoding="utf-8"))
@@ -422,6 +555,16 @@ def read_transcript(project_id: str):
         return {"metadata": {key: payload.get(key) for key in (
             "project_id", "source_filename", "language", "language_probability", "model", "device", "compute_type", "processed_at", "duration_seconds"
         )}, "segments": payload.get("segments", []), "words": payload.get("words", [])}
+
+
+@app.get("/api/projects/{project_id}/transcript-folder")
+def transcript_folder(project_id: str):
+    with get_session() as db:
+        project = db.get(Project, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        folder = (settings.data_dir / "projects" / project.id / "transcript").resolve()
+        return {"path": str(folder)}
 
 
 @app.get("/api/projects/{project_id}/transcript/{output_format}")
@@ -440,5 +583,6 @@ def download_transcript(project_id: str, output_format: str):
         allowed_dir = (settings.data_dir / "projects" / project.id / "transcript").resolve()
         if path.parent != allowed_dir or not path.is_file():
             raise HTTPException(status_code=404, detail="Transcript output file is missing")
-    media_types = {"txt": "text/plain", "srt": "application/x-subrip", "json": "application/json"}
-    return FileResponse(path, media_type=media_types[output_format], filename=f"transcript.{output_format}")
+    media_types = {"txt": ("text/plain", "transcript.txt"), "srt": ("application/x-subrip", "transcript.srt"), "json": ("application/json", "words.json")}
+    media_type, filename = media_types[output_format]
+    return FileResponse(path, media_type=media_type, filename=filename)

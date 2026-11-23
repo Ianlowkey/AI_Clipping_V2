@@ -164,7 +164,7 @@ describe("application interface", () => {
   });
 
   it("starts transcription, shows stages and transcript, and exposes downloads", async () => {
-    const transcript = { metadata: { project_id: "p1", source_filename: "source.mp4", language: "en", language_probability: 0.99, model: "small", device: "cpu", processed_at: "2026-01-01T00:00:00Z", duration_seconds: 1 }, segments: [{ start: 0.2, end: 0.8, text: "Hello there.", words: [] }], words: [{ start: 0.2, end: 0.4, text: " Hello" }] };
+    const transcript = { metadata: { project_id: "p1", source_filename: "source.mp4", language: "en", language_probability: 0.99, model: "small", device: "cpu", compute_type: "int8", processed_at: "2026-01-01T00:00:00Z", duration_seconds: 1 }, segments: [{ start: 0.2, end: 0.8, text: "Hello there.", words: [] }], words: [{ start: 0.2, end: 0.4, text: " Hello" }] };
     let releaseStart: ((value: Response) => void) | undefined;
     let statusCalls = 0;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -175,6 +175,7 @@ describe("application interface", () => {
       if (url.endsWith("/api/clips")) return Promise.resolve(response([]));
       if (url.endsWith("/api/jobs")) return Promise.resolve(response([]));
       if (url.endsWith("/api/projects/p1/transcript")) return Promise.resolve(response(transcript));
+      if (url.endsWith("/api/projects/p1/transcript-folder")) return Promise.resolve(response({ path: "C:\\Users\\test\\AIClippingData\\projects\\p1\\transcript" }));
       if (url.endsWith("/api/projects/p1/transcription") && init?.method === "POST") return new Promise<Response>(resolve => { releaseStart = resolve; });
       if (url.endsWith("/api/projects/p1/transcription")) return Promise.resolve(response({ detail: "No previous job" }, 404));
       if (url.includes("/api/projects/p1/transcription/jobs/")) {
@@ -191,12 +192,16 @@ describe("application interface", () => {
     fireEvent.click(screen.getByRole("button", { name: "Process Video" }));
     expect(screen.getByRole("button", { name: "Starting…" }).hasAttribute("disabled")).toBe(true);
     releaseStart?.(response({ id: "job1", project_id: "p1", status: "queued", stage: "queued", error_message: null, model_name: "small", device: "cuda", language: null, started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }, 202));
-    expect(await screen.findByText("Transcribing audio", {}, { timeout: 4000 })).toBeTruthy();
-    expect(await screen.findByText("Transcription complete", {}, { timeout: 4000 })).toBeTruthy();
+    expect(await screen.findByText("Transcribing", {}, { timeout: 4000 })).toBeTruthy();
+    expect(await screen.findByText("Completed", {}, { timeout: 4000 })).toBeTruthy();
     expect(await screen.findByText("Hello there.", {}, { timeout: 4000 })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Download TXT" }).getAttribute("href")).toContain("/transcript/txt");
-    expect(screen.getByRole("link", { name: "Download SRT" }).getAttribute("href")).toContain("/transcript/srt");
-    expect(screen.getByRole("link", { name: "Download words JSON" }).getAttribute("href")).toContain("/transcript/json");
+    expect(screen.getByRole("link", { name: "Download transcript.txt" }).getAttribute("href")).toContain("/transcript/txt");
+    expect(screen.getByRole("link", { name: "Download transcript.srt" }).getAttribute("href")).toContain("/transcript/srt");
+    expect(screen.getByRole("link", { name: "Download words.json" }).getAttribute("href")).toContain("/transcript/json");
+    expect(screen.getByText(/Compute: int8/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open Transcript Folder" }));
+    expect(await screen.findByText(/Browser mode cannot open local folders/)).toBeTruthy();
+    expect(await screen.findByText(/C:\\Users\\test\\AIClippingData/)).toBeTruthy();
   });
 
   it("shows a useful transcription start error", async () => {
@@ -208,6 +213,7 @@ describe("application interface", () => {
       if (url.endsWith("/api/projects/p1/transcription") && init?.method === "POST") return response({ detail: "Import and prepare a local video before starting transcription." }, 422);
       if (url.endsWith("/api/projects/p1/transcription")) return response({ detail: "No previous job" }, 404);
       if (url.endsWith("/api/projects/p1/transcript")) return response({ detail: "No transcript" }, 404);
+      if (url.endsWith("/api/projects/p1/highlights/candidates")) return response([]);
       return response({ detail: "Not found" }, 404);
     }));
     render(<App />);
@@ -215,5 +221,64 @@ describe("application interface", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open Test project" }));
     fireEvent.click(screen.getByRole("button", { name: "Process Video" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Import and prepare a local video");
+  });
+
+  it("runs highlight analysis and supports candidate editing and review", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const candidate = { id: "c1", project_id: "p1", transcript_id: "t1", start_seconds: 20, end_seconds: 50, duration_seconds: 30, excerpt: "A real transcript passage", title: "Strong moment", hook: "Why this matters", category: "insight", selection_explanation: "Self-contained", score: 82, hook_strength: 80, engagement_potential: 82, standalone_clarity: 90, emotional_value: 70, review_status: "suggested", selected_for_render: false, validation_warnings: null, created_at: "2026-01-01T00:00:00Z" };
+    let candidates: typeof candidate[] = [];
+    let poll = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return response({ status: "ok", database_ready: true, mode: "local" });
+      if (url.endsWith("/api/projects")) return response([project]);
+      if (url.endsWith("/api/clips") || url.endsWith("/api/jobs")) return response([]);
+      if (url.endsWith("/api/projects/p1/transcript")) return response({ detail: "No transcript" }, 404);
+      if (url.endsWith("/api/projects/p1/transcription")) return response({ detail: "No job" }, 404);
+      if (url.endsWith("/api/projects/p1/highlights/candidates")) return response(candidates);
+      if (url.endsWith("/api/projects/p1/highlights") && init?.method === "POST") return response({ id: "h1", project_id: "p1", status: "queued", stage: "queued", error_message: null, model_name: "gemini-3.6-flash", started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }, 202);
+      if (url.endsWith("/api/projects/p1/highlights/jobs/h1")) { poll++; return response({ id: "h1", project_id: "p1", status: poll < 2 ? "processing" : "completed", stage: poll < 2 ? "calling_gemini" : "completed", error_message: null, model_name: "gemini-3.6-flash", started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }); }
+      if (url.endsWith("/candidates/c1") && init?.method === "PATCH") { const body = JSON.parse(String(init.body)); Object.assign(candidate, body, { review_status: "edited" }); return response(candidate); }
+      if (url.endsWith("/candidates/c1/review") && init?.method === "PATCH") { const body = JSON.parse(String(init.body)); Object.assign(candidate, { review_status: body.status, selected_for_render: body.status === "rejected" ? false : candidate.selected_for_render }); return response(candidate); }
+      if (url.endsWith("/candidates/c1/selection") && init?.method === "PATCH") { const body = JSON.parse(String(init.body)); if (candidate.review_status !== "approved" && body.selected) return response({ detail: "Only approved candidates can be selected" }, 409); Object.assign(candidate, { selected_for_render: body.selected }); return response(candidate); }
+      return response({ detail: "Not found" }, 404);
+    }));
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Test project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Find Highlights" }));
+    expect(await screen.findByText("Calling Gemini")).toBeTruthy();
+    candidates = [candidate];
+    expect(await screen.findByText("Strong moment")).toBeTruthy();
+    const preview = screen.getByLabelText("Preview Strong moment") as HTMLVideoElement;
+    expect(preview.getAttribute("src")).toContain("/api/projects/p1/source-video/preview");
+    Object.defineProperty(preview, "currentTime", { configurable: true, writable: true, value: 0 });
+    fireEvent.loadedMetadata(preview);
+    expect(preview.currentTime).toBe(20);
+    preview.currentTime = 80;
+    fireEvent.seeking(preview);
+    expect(preview.currentTime).toBe(20);
+    const pause = vi.fn();
+    Object.defineProperty(preview, "pause", { configurable: true, value: pause });
+    preview.currentTime = 50;
+    fireEvent.timeUpdate(preview);
+    expect(pause).toHaveBeenCalledOnce();
+    expect(preview.currentTime).toBe(20);
+    fireEvent.change(screen.getByLabelText("Title", { selector: "input" }), { target: { value: "Edited highlight" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save edits" }));
+    await waitFor(() => expect(candidate.title).toBe("Edited highlight"));
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(candidate.review_status).toBe("approved"));
+    expect(await screen.findByText("Selected for rendering: 0")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Select for rendering"));
+    await waitFor(() => expect(candidate.selected_for_render).toBe(true));
+    expect(await screen.findByText("Selected for rendering: 1")).toBeTruthy();
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Test project" }));
+    expect(await screen.findByText("Selected for rendering: 1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(candidate.review_status).toBe("rejected"));
+    expect(candidate.selected_for_render).toBe(false);
+    expect(await screen.findByText("Selected for rendering: 0")).toBeTruthy();
   });
 });

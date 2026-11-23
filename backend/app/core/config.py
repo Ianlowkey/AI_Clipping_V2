@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     whisper_language: str | None = None
     whisper_cpu_fallback: bool = False
     whisper_audio_chunk_seconds: int = Field(default=600, gt=0)
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
     api_host: str = "127.0.0.1"
     api_port: int = 8765
 

@@ -80,8 +80,6 @@ def start_transcription(project_id: str, regenerate: bool = False) -> Processing
         existing = db.scalar(select(Transcript).where(Transcript.project_id == project_id))
         if existing and not regenerate:
             raise FileExistsError("A transcript already exists. Use Regenerate transcription to replace it.")
-        if existing and not all(path and Path(path).is_file() for path in (existing.text_path, existing.srt_path, existing.words_path)):
-            raise FileExistsError("A transcript record already exists. Request explicit regeneration to replace it.")
         job = ProcessingJob(
             project_id=project_id,
             job_type="transcription",
@@ -147,6 +145,8 @@ def _run_transcription(job_id: str, project_id: str, source_id: str, regenerate:
             transcript_dir=transcript_dir,
             stage_callback=lambda stage, detail, device: _set_stage(job_id, stage, detail, device),
         )
+        if not all(result.get(key) and Path(result[key]).is_file() for key in ("text_path", "srt_path", "words_path")):
+            raise TranscriptionError("Transcription did not produce every required output file. Retry the job.")
         with database.SessionLocal() as db:
             transcript = db.scalar(select(Transcript).where(Transcript.project_id == project_id))
             if transcript is None:

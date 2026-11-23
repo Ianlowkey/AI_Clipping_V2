@@ -105,3 +105,77 @@ class TranscriptRead(BaseModel):
     word_count: int
 
 
+class GeminiSettingsRead(BaseModel):
+    configured: bool
+    model: str
+    key_environment_variable: str = "AICLIPPING_GEMINI_API_KEY"
+
+
+class HighlightJobRead(BaseModel):
+    id: str
+    project_id: str
+    status: str
+    stage: str | None
+    error_message: str | None
+    model_name: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    updated_at: datetime
+
+
+class CandidateRead(BaseModel):
+    id: str
+    project_id: str
+    transcript_id: str | None
+    start_seconds: float
+    end_seconds: float
+    duration_seconds: float | None
+    excerpt: str | None
+    title: str | None
+    hook: str | None
+    category: str | None
+    selection_explanation: str | None
+    score: float
+    hook_strength: int | None
+    engagement_potential: int | None
+    standalone_clarity: int | None
+    emotional_value: int | None
+    review_status: str
+    selected_for_render: bool
+    validation_warnings: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CandidateEdit(BaseModel):
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    title: str = Field(min_length=1, max_length=300)
+    hook: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("title", "hook")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Title and hook must not be blank")
+        return value
+
+
+class CandidateReview(BaseModel):
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"approved", "rejected"}:
+            raise ValueError("Review status must be approved or rejected")
+        return normalized
+
+
+class CandidateSelection(BaseModel):
+    selected: bool
+
+

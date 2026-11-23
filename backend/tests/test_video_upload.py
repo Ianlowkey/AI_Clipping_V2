@@ -64,6 +64,32 @@ def test_video_upload_prepares_and_stores_file(tmp_path, monkeypatch):
     assert {path.name for path in project_root.iterdir()} == set(PROJECT_DIRECTORIES)
 
 
+def test_source_preview_streams_ranges_and_rejects_paths_outside_project(tmp_path, monkeypatch):
+    from app.core import config
+    from app.database import session as database
+    from app.database.models import SourceVideo
+
+    setup_test_data(tmp_path, monkeypatch)
+    video = make_video(tmp_path, config.settings)
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"private file")
+    with TestClient(app) as client:
+        project_id = create_project(client)
+        uploaded = client.post(f"/api/projects/{project_id}/source-video", files={"file": ("sample.mp4", video.read_bytes(), "video/mp4")})
+        assert uploaded.status_code == 201
+        preview = client.get(f"/api/projects/{project_id}/source-video/preview", headers={"Range": "bytes=0-15"})
+        with database.SessionLocal() as db:
+            source = db.query(SourceVideo).filter_by(project_id=project_id).one()
+            source.local_path = str(outside)
+            db.commit()
+        escaped = client.get(f"/api/projects/{project_id}/source-video/preview")
+
+    assert preview.status_code == 206
+    assert preview.headers["content-range"].startswith("bytes 0-15/")
+    assert len(preview.content) == 16
+    assert escaped.status_code == 404
+
+
 def test_upload_rejects_invalid_extension_and_missing_project(tmp_path, monkeypatch):
     setup_test_data(tmp_path, monkeypatch)
     with TestClient(app) as client:

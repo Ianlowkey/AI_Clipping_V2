@@ -93,6 +93,10 @@ export type TranscriptResult = {
   words: { start: number; end: number; text: string; probability?: number }[];
 };
 
+export type GeminiSettings = { configured: boolean; model: string; key_environment_variable: string };
+export type HighlightJob = { id: string; project_id: string; status: string; stage: string | null; error_message: string | null; model_name: string | null; started_at: string | null; completed_at: string | null; updated_at: string };
+export type HighlightCandidate = { id: string; project_id: string; transcript_id: string | null; start_seconds: number; end_seconds: number; duration_seconds: number | null; excerpt: string | null; title: string | null; hook: string | null; category: string | null; selection_explanation: string | null; score: number; hook_strength: number | null; engagement_potential: number | null; standalone_clarity: number | null; emotional_value: number | null; review_status: string; selected_for_render: boolean; validation_warnings: string | null; created_at: string };
+
 const API_BASE_URL = "http://127.0.0.1:8765";
 
 export async function getApiHealth(): Promise<ApiHealth> {
@@ -125,6 +129,15 @@ export const getLatestTranscriptionJob = (projectId: string) => request<Transcri
 export const getTranscriptionJob = (projectId: string, jobId: string) => request<TranscriptionJob>(`/api/projects/${encodeURIComponent(projectId)}/transcription/jobs/${encodeURIComponent(jobId)}`);
 export const startTranscription = (projectId: string, regenerate: boolean) => request<TranscriptionJob>(`/api/projects/${encodeURIComponent(projectId)}/transcription`, { method: "POST", body: JSON.stringify({ regenerate }) });
 export const getTranscript = (projectId: string) => request<TranscriptResult>(`/api/projects/${encodeURIComponent(projectId)}/transcript`);
+export const getTranscriptFolder = (projectId: string) => request<{ path: string }>(`/api/projects/${encodeURIComponent(projectId)}/transcript-folder`);
+export const getGeminiSettings = () => request<GeminiSettings>("/api/settings/gemini");
+export const startHighlightAnalysis = (projectId: string) => request<HighlightJob>(`/api/projects/${encodeURIComponent(projectId)}/highlights`, { method: "POST" });
+export const getHighlightJob = (projectId: string, jobId?: string) => request<HighlightJob>(`/api/projects/${encodeURIComponent(projectId)}/highlights/jobs/${jobId ? encodeURIComponent(jobId) : "latest"}`);
+export const getHighlightCandidates = (projectId: string) => request<HighlightCandidate[]>(`/api/projects/${encodeURIComponent(projectId)}/highlights/candidates`);
+export const sourceVideoPreviewUrl = (projectId: string) => `${API_BASE_URL}/api/projects/${encodeURIComponent(projectId)}/source-video/preview`;
+export const updateHighlightCandidate = (projectId: string, candidateId: string, data: Pick<HighlightCandidate, "start_seconds" | "end_seconds" | "title" | "hook">) => request<HighlightCandidate>(`/api/projects/${encodeURIComponent(projectId)}/highlights/candidates/${encodeURIComponent(candidateId)}`, { method: "PATCH", body: JSON.stringify(data) });
+export const reviewHighlightCandidate = (projectId: string, candidateId: string, status: "approved" | "rejected") => request<HighlightCandidate>(`/api/projects/${encodeURIComponent(projectId)}/highlights/candidates/${encodeURIComponent(candidateId)}/review`, { method: "PATCH", body: JSON.stringify({ status }) });
+export const selectHighlightCandidate = (projectId: string, candidateId: string, selected: boolean) => request<HighlightCandidate>(`/api/projects/${encodeURIComponent(projectId)}/highlights/candidates/${encodeURIComponent(candidateId)}/selection`, { method: "PATCH", body: JSON.stringify({ selected }) });
 export const transcriptDownloadUrl = (projectId: string, format: "txt" | "srt" | "json") => `${API_BASE_URL}/api/projects/${encodeURIComponent(projectId)}/transcript/${format}`;
 export const createProject = (input: {
   name: string;
