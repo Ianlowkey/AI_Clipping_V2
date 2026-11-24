@@ -1,6 +1,10 @@
 fastapi<1,>=0.115
+faster-whisper<2,>=1.2.1
+google-genai<2,>=1.0
+keyring<26,>=25.6
 pydantic<3,>=2.10
 pydantic-settings<3,>=2.7
+python-multipart<1,>=0.0.20
 sqlalchemy<3,>=2.0
 uvicorn[standard]<1,>=0.34
 

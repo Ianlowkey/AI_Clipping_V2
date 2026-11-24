@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,7 +54,149 @@ def test_transcription_writes_txt_srt_and_word_json(tmp_path, monkeypatch):
     assert payload["language"] == "en"
     assert payload["segments"][0]["words"][1]["text"] == " world."
     assert payload["words"][0]["start"] == 0.12
+    assert payload["diarization_status"] == "unavailable"
+    assert payload["diarization_detail"] == "model_not_configured"
+    assert payload["words"][0].get("speaker_id") is None
     assert [stage for stage, _ in stages] == ["preparing_audio", "loading_model", "transcribing", "saving_transcript"]
+
+
+def test_diarization_availability_diagnostics_are_explicit(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcription.diarization.settings, "diarization_model_path", None)
+    state = transcription.diarization.availability()
+    assert state["detail"] == "model_not_configured"
+
+    missing = tmp_path / "missing-model"
+    monkeypatch.setattr(transcription.diarization.settings, "diarization_model_path", missing)
+    state = transcription.diarization.availability()
+    assert state["detail"] == "model_path_missing"
+
+    incomplete = tmp_path / "incomplete-model"
+    incomplete.mkdir()
+    monkeypatch.setattr(transcription.diarization.settings, "diarization_model_path", incomplete)
+    state = transcription.diarization.availability()
+    assert state["detail"] == "model_bundle_incomplete"
+
+    (incomplete / "config.yaml").write_text("pipeline: test\n", encoding="utf-8")
+    monkeypatch.setattr(transcription.diarization.importlib.util, "find_spec",
+                        lambda _name: None)
+    state = transcription.diarization.availability()
+    assert state["detail"] == "dependency_not_installed"
+
+
+def test_optional_diarization_aligns_stable_labels_and_leaves_overlap_unknown():
+    words = [
+        {"start": 0.0, "end": 0.8, "text": " one"},
+        {"start": 1.0, "end": 2.0, "text": " overlapping"},
+        {"start": 2.0, "end": 3.0, "text": " two"},
+    ]
+    segments = [{"start": 0.0, "end": 3.0, "text": "one overlapping two", "words": words}]
+    aligned_words, aligned_segments, status = transcription.diarization.assign_speakers(
+        words, segments, [(0.0, 1.2, "raw-a"), (1.7, 3.0, "raw-b")]
+    )
+    assert status == "complete"
+    assert [word["speaker_id"] for word in aligned_words] == ["speaker_1", None, "speaker_2"]
+    assert aligned_segments[0]["speaker_id"] is None
+    assert [speaker["speaker_id"] for speaker in transcription.diarization.assign_speakers(
+        words, segments, [(0.0, 1.2, "raw-a"), (1.7, 3.0, "raw-b")]
+    )[0]] == ["speaker_1", None, "speaker_2"]
+
+
+def test_diarize_file_prepares_mono_wav_and_applies_source_offset(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"mock video")
+    wav = tmp_path / "diarization.wav"
+    wav.write_bytes(b"RIFF")
+    monkeypatch.setattr(transcription.diarization.settings, "diarization_model_path", tmp_path)
+    monkeypatch.setattr(transcription.diarization, "availability", lambda: {"available": True, "status": "ready", "message": "ready"})
+    seen = {}
+
+    class Pipeline:
+        def __call__(self, path):
+            seen["path"] = path
+            return [
+                types.SimpleNamespace(start=1.0, end=2.0, speaker_diarization=None),
+            ]
+
+    monkeypatch.setattr(transcription.diarization, "_load_pipeline", lambda _path: Pipeline())
+    monkeypatch.setattr(transcription.diarization, "_prepare_audio", lambda _source: (wav, tmp_path))
+    monkeypatch.setattr(transcription.diarization, "_annotation_turns", lambda _output: [(1.0, 2.0, "raw-a")])
+
+    words = [{"start": 1.5, "end": 2.5, "text": " hello"}]
+    segments = [{"start": 1.0, "end": 2.5, "text": "hello", "words": words}]
+    result = transcription.diarization.diarize_file(source, words, segments, source_offset_seconds=0.25)
+    assert seen["path"] == str(wav)
+    assert result["status"] == "complete"
+    assert result["speaker_turns"][0]["start"] == 1.25
+    assert result["speaker_turns"][0]["end"] == 2.25
+
+
+def test_diarization_unavailable_and_failure_are_nonfatal(tmp_path, monkeypatch):
+    words = [{"start": 0.0, "end": 1.0, "text": " hello"}]
+    segments = [{"start": 0.0, "end": 1.0, "text": "hello", "words": words}]
+    monkeypatch.setattr(transcription.diarization.settings, "diarization_model_path", None)
+    unavailable = transcription.diarization.diarize_file(tmp_path / "source.mp4", words, segments)
+    assert unavailable["status"] == "unavailable"
+    assert unavailable["words"] == words
+    monkeypatch.setattr(transcription.diarization.settings, "diarization_model_path", tmp_path)
+    monkeypatch.setattr(transcription.diarization, "_configured_model_path", lambda: tmp_path)
+    monkeypatch.setattr(transcription.diarization, "availability", lambda: {"available": True, "status": "ready", "message": "ready"})
+    monkeypatch.setattr(transcription.diarization, "_load_pipeline", lambda _path: (_ for _ in ()).throw(OSError("blocked native dependency")))
+    fallback = transcription.diarization.diarize_file(tmp_path / "source.mp4", words, segments)
+    assert fallback["status"] == "incomplete"
+    assert fallback["words"] == words
+    assert "still available" in fallback["message"]
+
+
+def test_optional_pipeline_uses_local_offline_bundle_without_telemetry(tmp_path, monkeypatch):
+    import os
+
+    seen = {}
+    class Pipeline:
+        @classmethod
+        def from_pretrained(cls, path):
+            seen.update(path=path, offline=os.environ.get("HF_HUB_OFFLINE"), metrics=os.environ.get("PYANNOTE_METRICS_ENABLED"))
+            return cls()
+        def to(self, device):
+            seen["device"] = device
+    pyannote = types.ModuleType("pyannote")
+    pyannote.__path__ = []
+    audio = types.ModuleType("pyannote.audio")
+    audio.Pipeline = Pipeline
+    torch = types.ModuleType("torch")
+    torch.device = lambda value: value
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", audio)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.delenv("PYANNOTE_METRICS_ENABLED", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(transcription.diarization, "_pipeline", None)
+    monkeypatch.setattr(transcription.diarization, "_pipeline_path", None)
+    pipeline = transcription.diarization._load_pipeline(tmp_path)
+    assert isinstance(pipeline, Pipeline)
+    assert seen == {"path": str(tmp_path), "offline": "1", "metrics": "0", "device": "cpu"}
+    assert os.environ["PYANNOTE_METRICS_ENABLED"] == "0"
+    assert "HF_HUB_OFFLINE" not in os.environ
+
+
+def test_transcript_formats_and_persists_optional_speaker_labels(tmp_path):
+    payload = {
+        "segments": [{"start": 0.0, "end": 1.0, "text": "Hello.", "speaker_id": "speaker_1",
+                      "words": [{"start": 0.0, "end": 1.0, "text": " Hello.", "speaker_id": "speaker_1"}]}],
+        "words": [{"start": 0.0, "end": 1.0, "text": " Hello.", "speaker_id": "speaker_1"}],
+        "speakers": [{"speaker_id": "speaker_1", "label": "Speaker 1"}],
+        "diarization_status": "complete", "diarization_message": "estimated locally",
+    }
+    paths = transcription._write_outputs(tmp_path / "transcript", payload)
+    assert "Speaker 1: Hello." in Path(paths["text_path"]).read_text(encoding="utf-8")
+    assert "Speaker 1: Hello." in Path(paths["srt_path"]).read_text(encoding="utf-8")
+    saved = json.loads(Path(paths["words_path"]).read_text(encoding="utf-8"))
+    assert saved["speakers"][0]["speaker_id"] == "speaker_1"
+    assert saved["words"][0]["speaker_id"] == "speaker_1"
+    unknown = {"segments": [{"start": 0.0, "end": 1.0, "text": "Unclear overlap.", "words": [
+        {"start": 0.0, "end": 1.0, "text": " Unclear overlap.", "speaker_id": None},
+    ]}], "words": [], "speakers": [], "diarization_status": "incomplete"}
+    unknown_paths = transcription._write_outputs(tmp_path / "unknown", unknown)
+    assert "Unknown speaker: Unclear overlap." in Path(unknown_paths["text_path"]).read_text(encoding="utf-8")
 
 
 def test_no_audio_and_model_failures_are_actionable(tmp_path, monkeypatch):

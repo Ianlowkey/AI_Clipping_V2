@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 class ProjectCreate(BaseModel):
@@ -109,6 +110,13 @@ class GeminiSettingsRead(BaseModel):
     configured: bool
     model: str
     key_environment_variable: str = "AICLIPPING_GEMINI_API_KEY"
+    saved_in_credential_manager: bool = False
+    secure_storage_available: bool = False
+    source: str = "none"
+
+
+class GeminiKeyWrite(BaseModel):
+    api_key: SecretStr
 
 
 class HighlightJobRead(BaseModel):
@@ -118,6 +126,8 @@ class HighlightJobRead(BaseModel):
     stage: str | None
     error_message: str | None
     model_name: str | None
+    detection_mode: Literal["general", "comedy"] = "general"
+    content_profile: Literal["general", "podcast_conversation"] = "podcast_conversation"
     started_at: datetime | None
     completed_at: datetime | None
     updated_at: datetime
@@ -140,6 +150,14 @@ class CandidateRead(BaseModel):
     engagement_potential: int | None
     standalone_clarity: int | None
     emotional_value: int | None
+    conversational_engagement: int | None = None
+    storytelling_interest: int | None = None
+    surprise_potential: int | None = None
+    emotional_impact: int | None = None
+    clip_completeness: int | None = None
+    speaker_context: str | None = None
+    comedy_potential: int | None
+    comedy_explanation: str | None
     review_status: str
     selected_for_render: bool
     validation_warnings: str | None
@@ -177,5 +195,45 @@ class CandidateReview(BaseModel):
 
 class CandidateSelection(BaseModel):
     selected: bool
+
+
+class HighlightAnalysisStart(BaseModel):
+    detection_mode: Literal["general", "comedy"] = "general"
+    content_profile: Literal["general", "podcast_conversation"] = "podcast_conversation"
+
+
+class RenderStart(BaseModel):
+    candidate_ids: list[str] = Field(max_length=100)
+    output_profile: Literal["original", "vertical", "square"] = "vertical"
+
+
+class RenderJobRead(BaseModel):
+    id: str
+    project_id: str
+    status: str
+    stage: str | None
+    progress_percent: int
+    error_message: str | None
+    output_profile: Literal["original", "vertical", "square"] | None
+    candidate_count: int = 0
+    started_at: datetime | None
+    completed_at: datetime | None
+    updated_at: datetime
+
+
+class ExportRead(BaseModel):
+    id: str
+    project_id: str
+    candidate_id: str | None
+    file_path: str | None
+    filename: str
+    duration_seconds: float | None
+    output_profile: Literal["original", "vertical", "square"] | None
+    file_size_bytes: int | None
+    width: int | None
+    height: int | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 

@@ -48,17 +48,22 @@ def create_database() -> Engine:
     job_columns = {column["name"] for column in inspect(engine).get_columns("processing_jobs")}
     job_migrations = {
         "job_type": "VARCHAR(32) NOT NULL DEFAULT 'generic'",
+        "detection_mode": "VARCHAR(20) NOT NULL DEFAULT 'general'",
+        "content_profile": "VARCHAR(32) NOT NULL DEFAULT 'podcast_conversation'",
         "stage": "VARCHAR(40)",
         "active_project_id": "VARCHAR(36)",
         "model_name": "VARCHAR(100)",
         "device": "VARCHAR(32)",
         "compute_type": "VARCHAR(32)",
         "language": "VARCHAR(16)",
+        "output_profile": "VARCHAR(20)",
+        "candidate_ids_json": "TEXT",
         "started_at": "DATETIME",
         "completed_at": "DATETIME",
     }
     transcript_columns = {column["name"] for column in inspect(engine).get_columns("transcripts")}
     candidate_columns = {column["name"] for column in inspect(engine).get_columns("highlight_candidates")}
+    clip_columns = {column["name"] for column in inspect(engine).get_columns("clips")}
     candidate_migrations = {
         "analysis_job_id": "VARCHAR(36)", "transcript_id": "VARCHAR(36)", "duration_seconds": "FLOAT",
         "excerpt": "TEXT", "title": "VARCHAR(300)", "hook": "TEXT", "category": "VARCHAR(40)",
@@ -66,6 +71,10 @@ def create_database() -> Engine:
         "standalone_clarity": "INTEGER", "emotional_value": "INTEGER",
         "review_status": "VARCHAR(20) NOT NULL DEFAULT 'suggested'", "validation_warnings": "TEXT",
         "selected_for_render": "BOOLEAN NOT NULL DEFAULT 0",
+        "comedy_potential": "INTEGER", "comedy_explanation": "TEXT",
+        "conversational_engagement": "INTEGER", "storytelling_interest": "INTEGER",
+        "surprise_potential": "INTEGER", "emotional_impact": "INTEGER",
+        "clip_completeness": "INTEGER", "speaker_context": "TEXT",
         "created_at": "DATETIME",
     }
     transcript_migrations = {
@@ -77,6 +86,13 @@ def create_database() -> Engine:
         "language_probability": "FLOAT",
         "duration_seconds": "FLOAT",
     }
+    clip_migrations = {
+        "output_profile": "VARCHAR(20)",
+        "file_size_bytes": "INTEGER",
+        "width": "INTEGER",
+        "height": "INTEGER",
+        "media_metadata_json": "TEXT",
+    }
     with engine.begin() as connection:
         for name, column_type in job_migrations.items():
             if name not in job_columns:
@@ -87,6 +103,13 @@ def create_database() -> Engine:
         for name, column_type in candidate_migrations.items():
             if name not in candidate_columns:
                 connection.execute(text(f"ALTER TABLE highlight_candidates ADD COLUMN {name} {column_type}"))
+        connection.execute(text(
+            "UPDATE highlight_candidates SET review_status = 'approved' "
+            "WHERE approved = 1 AND review_status = 'suggested'"
+        ))
+        for name, column_type in clip_migrations.items():
+            if name not in clip_columns:
+                connection.execute(text(f"ALTER TABLE clips ADD COLUMN {name} {column_type}"))
         connection.execute(text("UPDATE highlight_candidates SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_highlight_candidates_analysis_job_id ON highlight_candidates(analysis_job_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_highlight_candidates_transcript_id ON highlight_candidates(transcript_id)"))

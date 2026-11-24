@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -8,21 +9,23 @@ import tempfile
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.api_schemas import (CandidateEdit, CandidateRead, CandidateReview, CandidateSelection, ClipRead, GeminiSettingsRead,
-    HighlightJobRead, JobRead, ProjectCreate, ProjectRead, TranscriptionJobRead, TranscriptionStart)
+from app.api_schemas import (CandidateEdit, CandidateRead, CandidateReview, CandidateSelection, ClipRead, ExportRead, GeminiKeyWrite, GeminiSettingsRead,
+    HighlightAnalysisStart, HighlightJobRead, JobRead, ProjectCreate, ProjectRead, RenderJobRead, RenderStart, TranscriptionJobRead, TranscriptionStart)
 from app.database import session as database
 from app.database.models import Clip, ClipMetadata, HighlightCandidate, ProcessingJob, ProcessingLog, Project, SourceVideo, Transcript
 from app.storage import ensure_project_directories, project_directory, project_operation_lock, safe_video_filename
 from app.video import VideoPreparationError, prepare_video
 from app.transcription_jobs import get_transcription_job, recover_interrupted_jobs, start_transcription
 from app import highlight_detection
+from app import rendering
+from app import gemini_credentials
 
 logger = logging.getLogger(__name__)
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".wmv"}
@@ -34,6 +37,7 @@ async def lifespan(_: FastAPI):
     recover_project_deletion_staging()
     recover_interrupted_jobs()
     highlight_detection.recover_interrupted_jobs()
+    rendering.recover_interrupted_jobs()
     yield
 
 
@@ -278,6 +282,10 @@ async def _upload_source_video_locked(project_id: str, file: UploadFile):
         project = db.get(Project, project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found. Create or select a project before uploading.")
+        transcript = db.scalar(select(Transcript).where(Transcript.project_id == project_id))
+        candidate = db.scalar(select(HighlightCandidate).where(HighlightCandidate.project_id == project_id).limit(1))
+        if transcript is not None or candidate is not None:
+            raise HTTPException(status_code=409, detail="The source cannot be replaced after transcription or highlight review. Create a new project for a different source video.")
 
     try:
         project_dir = ensure_project_directories(project_id)
@@ -383,20 +391,66 @@ def list_jobs():
 
 
 @app.get("/api/settings/gemini", response_model=GeminiSettingsRead)
-def gemini_settings():
-    return GeminiSettingsRead(configured=bool(settings.gemini_api_key), model=settings.gemini_model)
+def gemini_settings(request: Request):
+    _require_local_request(request)
+    return GeminiSettingsRead(**gemini_credentials.configuration_status())
+
+
+def _require_local_request(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    try:
+        is_local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_local = False
+    if not is_local:
+        raise HTTPException(status_code=403, detail="Gemini key management is available only to the local application.")
+
+
+@app.put("/api/settings/gemini/key", response_model=GeminiSettingsRead)
+async def save_gemini_key(request: Request):
+    _require_local_request(request)
+    if request.headers.get("content-length", "0").isdigit() and int(request.headers["content-length"]) > 2048:
+        raise HTTPException(status_code=413, detail="Gemini API key request is too large.")
+    raw_content = await request.body()
+    if len(raw_content) > 2048:
+        raise HTTPException(status_code=413, detail="Gemini API key request is too large.")
+    try:
+        raw_body = json.loads(raw_content)
+        payload = GeminiKeyWrite.model_validate(raw_body)
+        api_key = payload.api_key.get_secret_value()
+        gemini_credentials.validate_api_key(api_key)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Enter a valid Gemini API key (20–256 letters, digits, underscores or hyphens).") from None
+    try:
+        gemini_credentials.save_api_key(api_key)
+    except gemini_credentials.CredentialStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    return GeminiSettingsRead(**gemini_credentials.configuration_status())
+
+
+@app.delete("/api/settings/gemini/key", response_model=GeminiSettingsRead)
+def delete_gemini_key(request: Request):
+    _require_local_request(request)
+    try:
+        gemini_credentials.delete_saved_api_key()
+    except gemini_credentials.CredentialStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    return GeminiSettingsRead(**gemini_credentials.configuration_status())
 
 
 def _highlight_job_read(job: ProcessingJob) -> HighlightJobRead:
     return HighlightJobRead(id=job.id, project_id=job.project_id, status=job.status, stage=job.stage,
-        error_message=job.error_message, model_name=job.model_name, started_at=job.started_at,
+        error_message=job.error_message, model_name=job.model_name, detection_mode=job.detection_mode,
+        content_profile=job.content_profile, started_at=job.started_at,
         completed_at=job.completed_at, updated_at=job.updated_at)
 
 
 @app.post("/api/projects/{project_id}/highlights", response_model=HighlightJobRead, status_code=202)
-def begin_highlight_analysis(project_id: str):
+def begin_highlight_analysis(project_id: str, payload: HighlightAnalysisStart | None = None):
     try:
-        return _highlight_job_read(highlight_detection.start_analysis(project_id))
+        mode = payload.detection_mode if payload is not None else "general"
+        profile = payload.content_profile if payload is not None else "podcast_conversation"
+        return _highlight_job_read(highlight_detection.start_analysis(project_id, mode, profile))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileExistsError as exc:
@@ -554,7 +608,8 @@ def read_transcript(project_id: str):
             raise HTTPException(status_code=500, detail="Transcript data could not be read") from exc
         return {"metadata": {key: payload.get(key) for key in (
             "project_id", "source_filename", "language", "language_probability", "model", "device", "compute_type", "processed_at", "duration_seconds"
-        )}, "segments": payload.get("segments", []), "words": payload.get("words", [])}
+        )} | {key: payload.get(key) for key in ("diarization_status", "diarization_detail", "diarization_message", "speakers", "speaker_turns")},
+            "segments": payload.get("segments", []), "words": payload.get("words", [])}
 
 
 @app.get("/api/projects/{project_id}/transcript-folder")
@@ -565,6 +620,118 @@ def transcript_folder(project_id: str):
             raise HTTPException(status_code=404, detail="Project not found")
         folder = (settings.data_dir / "projects" / project.id / "transcript").resolve()
         return {"path": str(folder)}
+
+
+def _render_job_read(job: ProcessingJob) -> RenderJobRead:
+    candidate_count = len(json.loads(job.candidate_ids_json or "[]"))
+    return RenderJobRead(
+        id=job.id,
+        project_id=job.project_id,
+        status=job.status,
+        stage=job.stage,
+        progress_percent=job.progress_percent,
+        error_message=job.error_message,
+        output_profile=job.output_profile,
+        candidate_count=candidate_count,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        updated_at=job.updated_at,
+    )
+
+
+@app.post("/api/projects/{project_id}/render", response_model=RenderJobRead, status_code=202)
+def begin_render(project_id: str, payload: RenderStart):
+    try:
+        job = rendering.start_render(project_id, payload.candidate_ids, payload.output_profile)
+        return _render_job_read(job)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except rendering.RenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/render/jobs/latest", response_model=RenderJobRead)
+def latest_render_job(project_id: str):
+    job = rendering.get_render_job(project_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No render job exists for this project")
+    return _render_job_read(job)
+
+
+@app.get("/api/projects/{project_id}/render/jobs/{job_id}", response_model=RenderJobRead)
+def read_render_job(project_id: str, job_id: str):
+    job = rendering.get_render_job(project_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found")
+    return _render_job_read(job)
+
+
+@app.post("/api/projects/{project_id}/render/jobs/{job_id}/retry", response_model=RenderJobRead, status_code=202)
+def retry_render_job(project_id: str, job_id: str):
+    job = rendering.get_render_job(project_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found")
+    if job.status != "failed":
+        raise HTTPException(status_code=409, detail="Only failed or interrupted render jobs can be retried")
+    try:
+        candidate_ids = json.loads(job.candidate_ids_json or "[]")
+        retried = rendering.start_render(project_id, candidate_ids, job.output_profile or "vertical")
+        return _render_job_read(retried)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/exports", response_model=list[ExportRead])
+def list_project_exports(project_id: str):
+    with get_session() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+    exports = rendering.list_exports(project_id)
+    result = []
+    for clip in exports:
+        path = Path(clip.file_path or "")
+        if not path.is_file():
+            continue
+        allowed = (project_directory(project_id) / "exports").resolve()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.parent != allowed:
+            continue
+        result.append(ExportRead(
+            id=clip.id,
+            project_id=clip.project_id,
+            candidate_id=clip.candidate_id,
+            file_path=str(resolved),
+            filename=resolved.name,
+            duration_seconds=clip.duration_seconds,
+            output_profile=clip.output_profile,
+            file_size_bytes=clip.file_size_bytes,
+            width=clip.width,
+            height=clip.height,
+            created_at=clip.created_at,
+        ))
+    return result
+
+
+@app.get("/api/projects/{project_id}/exports/{export_id}/download")
+def download_export(project_id: str, export_id: str):
+    with get_session() as db:
+        clip = db.get(Clip, export_id)
+    if clip is None or clip.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Export not found")
+    path = Path(clip.file_path or "").resolve()
+    allowed = (project_directory(project_id) / "exports").resolve()
+    if path.parent != allowed or not path.is_file():
+        raise HTTPException(status_code=404, detail="Export file is missing")
+    return FileResponse(path, media_type="video/mp4", filename=path.name)
 
 
 @app.get("/api/projects/{project_id}/transcript/{output_format}")

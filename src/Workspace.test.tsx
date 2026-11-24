@@ -52,6 +52,56 @@ describe("application interface", () => {
     }
   });
 
+  it("saves Gemini keys without retaining or displaying them or starting analysis", async () => {
+    const secret = "AIzaSy" + "X".repeat(35);
+    const status = { configured: false, model: "gemini-3.6-flash", key_environment_variable: "AICLIPPING_GEMINI_API_KEY", saved_in_credential_manager: false, secure_storage_available: true, source: "none" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return response({ status: "ok", database_ready: true, mode: "local" });
+      if (url.endsWith("/api/projects")) return response([]);
+      if (url.endsWith("/api/clips") || url.endsWith("/api/jobs")) return response([]);
+      if (url.endsWith("/api/settings/gemini") && init?.method === undefined) return response(status);
+      if (url.endsWith("/api/settings/gemini/key") && init?.method === "PUT") return response({ ...status, configured: true, saved_in_credential_manager: true, source: "credential_manager" });
+      if (url.endsWith("/api/settings/gemini/key") && init?.method === "DELETE") return response(status);
+      return response({ detail: "Not found" }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Settings" }));
+    const input = await screen.findByLabelText("Gemini API key") as HTMLInputElement;
+    expect(input.type).toBe("password");
+    expect(input.value).toBe("");
+    fireEvent.change(input, { target: { value: secret } });
+    fireEvent.click(screen.getByRole("button", { name: "Save API key" }));
+    expect(await screen.findByText("Gemini API key saved securely. No analysis was started.")).toBeTruthy();
+    await waitFor(() => expect(input.value).toBe(""));
+    expect(screen.queryByText(secret)).toBeNull();
+    expect(screen.getByRole("button", { name: "Replace saved key" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Delete saved key" }));
+    expect(await screen.findByText("Saved Gemini API key deleted.")).toBeTruthy();
+    expect(screen.getByText("API key: Not configured")).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/highlights"))).toBe(false);
+    const saveRequest = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/api/settings/gemini/key") && init?.method === "PUT");
+    expect(JSON.parse(String(saveRequest?.[1]?.body)).api_key).toBe(secret);
+  });
+
+  it("explains when secure Gemini key storage is unavailable and blocks saving", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return response({ status: "ok", database_ready: true, mode: "local" });
+      if (url.endsWith("/api/projects")) return response([]);
+      if (url.endsWith("/api/clips") || url.endsWith("/api/jobs")) return response([]);
+      if (url.endsWith("/api/settings/gemini")) return response({ configured: false, model: "gemini-3.6-flash", key_environment_variable: "AICLIPPING_GEMINI_API_KEY", saved_in_credential_manager: false, secure_storage_available: false, source: "none" });
+      return response({ detail: "Not found" }, 404);
+    }));
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Settings" }));
+    const input = await screen.findByLabelText("Gemini API key") as HTMLInputElement;
+    expect((await screen.findByRole("alert")).textContent).toContain("Windows Credential Manager is unavailable");
+    expect(input.disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Save API key" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("opens the same project form from both New Project buttons and creates a project", async () => {
     render(<App />);
     await screen.findByText("No projects yet");
@@ -164,7 +214,7 @@ describe("application interface", () => {
   });
 
   it("starts transcription, shows stages and transcript, and exposes downloads", async () => {
-    const transcript = { metadata: { project_id: "p1", source_filename: "source.mp4", language: "en", language_probability: 0.99, model: "small", device: "cpu", compute_type: "int8", processed_at: "2026-01-01T00:00:00Z", duration_seconds: 1 }, segments: [{ start: 0.2, end: 0.8, text: "Hello there.", words: [] }], words: [{ start: 0.2, end: 0.4, text: " Hello" }] };
+    const transcript = { metadata: { project_id: "p1", source_filename: "source.mp4", language: "en", language_probability: 0.99, model: "small", device: "cpu", compute_type: "int8", processed_at: "2026-01-01T00:00:00Z", duration_seconds: 1, diarization_status: "complete", diarization_message: "Estimated locally", speakers: [{ speaker_id: "speaker_1", label: "Speaker 1" }], speaker_turns: [{ start: 0.2, end: 0.8, speaker_id: "speaker_1" }] }, segments: [{ start: 0.2, end: 0.8, text: "Hello there.", speaker_id: "speaker_1", words: [{ start: 0.2, end: 0.8, text: " Hello there.", speaker_id: "speaker_1" }] }], words: [{ start: 0.2, end: 0.4, text: " Hello", speaker_id: "speaker_1" }] };
     let releaseStart: ((value: Response) => void) | undefined;
     let statusCalls = 0;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -194,7 +244,8 @@ describe("application interface", () => {
     releaseStart?.(response({ id: "job1", project_id: "p1", status: "queued", stage: "queued", error_message: null, model_name: "small", device: "cuda", language: null, started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }, 202));
     expect(await screen.findByText("Transcribing", {}, { timeout: 4000 })).toBeTruthy();
     expect(await screen.findByText("Completed", {}, { timeout: 4000 })).toBeTruthy();
-    expect(await screen.findByText("Hello there.", {}, { timeout: 4000 })).toBeTruthy();
+    expect(await screen.findByText("Speaker 1: Hello there.", {}, { timeout: 4000 })).toBeTruthy();
+    expect(screen.getByText(/Speaker diarization completed — local speaker-turn estimates/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Download transcript.txt" }).getAttribute("href")).toContain("/transcript/txt");
     expect(screen.getByRole("link", { name: "Download transcript.srt" }).getAttribute("href")).toContain("/transcript/srt");
     expect(screen.getByRole("link", { name: "Download words.json" }).getAttribute("href")).toContain("/transcript/json");
@@ -202,6 +253,88 @@ describe("application interface", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open Transcript Folder" }));
     expect(await screen.findByText(/Browser mode cannot open local folders/)).toBeTruthy();
     expect(await screen.findByText(/C:\\Users\\test\\AIClippingData/)).toBeTruthy();
+  });
+
+  it("distinguishes unavailable diarization while preserving the transcript", async () => {
+    const transcript = {
+      metadata: {
+        project_id: "p1", source_filename: "source.mp4", language: "en",
+        language_probability: 0.99, model: "small", device: "cpu", compute_type: "int8",
+        processed_at: "2026-01-01", duration_seconds: 2,
+        diarization_status: "unavailable", diarization_detail: "dependency_not_installed",
+        diarization_message: "Optional pyannote.audio support is not installed.",
+        speakers: null, speaker_turns: null,
+      },
+      segments: [{ start: 0.2, end: 1.2, text: "Hello there.", speaker_id: null,
+        words: [{ start: 0.2, end: 1.2, text: " Hello there.", speaker_id: null }] }],
+      words: [{ start: 0.2, end: 1.2, text: " Hello there.", speaker_id: null }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return response({ status: "ok", database_ready: true, mode: "local" });
+      if (url.endsWith("/api/projects")) return response([project]);
+      if (url.endsWith("/api/clips") || url.endsWith("/api/jobs")) return response([]);
+      if (url.endsWith("/api/projects/p1/transcript")) return response(transcript);
+      if (url.endsWith("/api/projects/p1/transcription")) return response({ detail: "No job" }, 404);
+      if (url.endsWith("/api/projects/p1/highlights/candidates")) return response([]);
+      return response({ detail: "Not found" }, 404);
+    }));
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Test project" }));
+    expect(await screen.findByText(/Diarization unavailable — optional pyannote\/Torch dependencies are not installed/)).toBeTruthy();
+    expect(screen.getByText("Hello there.", { exact: false })).toBeTruthy();
+  });
+
+  it("starts local rendering for approved selected candidates and shows exports", async () => {
+    const candidate = {
+      id:"c1", project_id:"p1", transcript_id:"t1", start_seconds:20, end_seconds:50,
+      duration_seconds:30, excerpt:"A podcast exchange", title:"Podcast moment", hook:"The reaction",
+      category:"story", selection_explanation:"Complete", score:80, hook_strength:80,
+      engagement_potential:85, standalone_clarity:90, emotional_value:70, comedy_potential:null,
+      comedy_explanation:null, conversational_engagement:90, storytelling_interest:85,
+      surprise_potential:75, emotional_impact:80, clip_completeness:95, speaker_context:"Speaker 1: setup",
+      review_status:"approved", selected_for_render:true, validation_warnings:null,
+      created_at:"2026-01-01",
+    };
+    const exportItem = {
+      id:"e1", project_id:"p1", candidate_id:"c1", file_path:"exports/candidate.mp4",
+      filename:"candidate_c1_vertical_123.mp4", duration_seconds:30, output_profile:"vertical",
+      file_size_bytes:1024*1024, width:1080, height:1920, created_at:"2026-01-01",
+    };
+    let renderProfile = "";
+    let renderedCandidateIds: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) return response({ status:"ok", database_ready:true, mode:"local" });
+      if (url.endsWith("/api/projects")) return response([project]);
+      if (url.endsWith("/api/clips") || url.endsWith("/api/jobs")) return response([]);
+      if (url.endsWith("/api/projects/p1/transcript")) return response({ detail:"No transcript" },404);
+      if (url.endsWith("/api/projects/p1/transcription")) return response({ detail:"No job" },404);
+      if (url.endsWith("/api/projects/p1/highlights/candidates")) return response([candidate]);
+      if (url.endsWith("/api/projects/p1/highlights")) return response({ detail:"No analysis" },404);
+      if (url.endsWith("/api/projects/p1/render") && init?.method==="POST") {
+        const body = JSON.parse(String(init.body));
+        renderProfile=body.output_profile;
+        renderedCandidateIds=body.candidate_ids;
+        return response({ id:"r1", project_id:"p1", status:"queued", stage:"queued", progress_percent:0,
+          error_message:null, output_profile:renderProfile, candidate_count:1, started_at:null,
+          completed_at:null, updated_at:"2026-01-01" },202);
+      }
+      if (url.endsWith("/api/projects/p1/render/jobs/r1")) return response({ id:"r1", project_id:"p1", status:"completed",
+        stage:"completed", progress_percent:100, error_message:null, output_profile:"vertical",
+        candidate_count:1, started_at:null, completed_at:"2026-01-01", updated_at:"2026-01-01" });
+      if (url.endsWith("/api/projects/p1/exports")) return response([exportItem]);
+      return response({ detail:"Not found" },404);
+    }));
+    render(<App />);
+    fireEvent.click(within(screen.getByRole("navigation")).getByRole("button",{name:"Projects"}));
+    fireEvent.click(await screen.findByRole("button",{name:"Open Test project"}));
+    await screen.findByText("Podcast moment");
+    fireEvent.change(screen.getByLabelText("Render output profile"),{target:{value:"square"}});
+    fireEvent.click(screen.getByRole("button",{name:"Render selected clips"}));
+    await waitFor(()=>expect(renderProfile).toBe("square"));
+    expect(renderedCandidateIds).toEqual(["c1"]);
   });
 
   it("shows a useful transcription start error", async () => {
@@ -225,9 +358,12 @@ describe("application interface", () => {
 
   it("runs highlight analysis and supports candidate editing and review", async () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
-    const candidate = { id: "c1", project_id: "p1", transcript_id: "t1", start_seconds: 20, end_seconds: 50, duration_seconds: 30, excerpt: "A real transcript passage", title: "Strong moment", hook: "Why this matters", category: "insight", selection_explanation: "Self-contained", score: 82, hook_strength: 80, engagement_potential: 82, standalone_clarity: 90, emotional_value: 70, review_status: "suggested", selected_for_render: false, validation_warnings: null, created_at: "2026-01-01T00:00:00Z" };
+    const candidate = { id: "c1", project_id: "p1", transcript_id: "t1", start_seconds: 20, end_seconds: 50, duration_seconds: 30, excerpt: "A real transcript passage", title: "Strong moment", hook: "Why this matters", category: "insight", selection_explanation: "Self-contained", score: 82, hook_strength: 80, engagement_potential: 82, standalone_clarity: 90, emotional_value: 70, comedy_potential: 91, comedy_explanation: "The reply unexpectedly flips the earlier setup.", review_status: "suggested", selected_for_render: false, validation_warnings: null, created_at: "2026-01-01T00:00:00Z" };
     let candidates: typeof candidate[] = [];
     let poll = 0;
+    let requestedMode = "";
+    let requestedProfile = "";
+    let renderedCandidateIds: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/health")) return response({ status: "ok", database_ready: true, mode: "local" });
@@ -236,20 +372,29 @@ describe("application interface", () => {
       if (url.endsWith("/api/projects/p1/transcript")) return response({ detail: "No transcript" }, 404);
       if (url.endsWith("/api/projects/p1/transcription")) return response({ detail: "No job" }, 404);
       if (url.endsWith("/api/projects/p1/highlights/candidates")) return response(candidates);
-      if (url.endsWith("/api/projects/p1/highlights") && init?.method === "POST") return response({ id: "h1", project_id: "p1", status: "queued", stage: "queued", error_message: null, model_name: "gemini-3.6-flash", started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }, 202);
-      if (url.endsWith("/api/projects/p1/highlights/jobs/h1")) { poll++; return response({ id: "h1", project_id: "p1", status: poll < 2 ? "processing" : "completed", stage: poll < 2 ? "calling_gemini" : "completed", error_message: null, model_name: "gemini-3.6-flash", started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }); }
+      if (url.endsWith("/api/projects/p1/highlights") && init?.method === "POST") { const body = JSON.parse(String(init.body)); requestedMode = body.detection_mode; requestedProfile = body.content_profile; return response({ id: "h1", project_id: "p1", status: "queued", stage: "queued", error_message: null, model_name: "gemini-3.6-flash", detection_mode: body.detection_mode, content_profile: body.content_profile, started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }, 202); }
+      if (url.endsWith("/api/projects/p1/highlights/jobs/h1")) { poll++; return response({ id: "h1", project_id: "p1", status: poll < 2 ? "processing" : "completed", stage: poll < 2 ? "calling_gemini" : "completed", error_message: null, model_name: "gemini-3.6-flash", detection_mode: "comedy", content_profile: "podcast_conversation", started_at: null, completed_at: null, updated_at: "2026-01-01T00:00:00Z" }); }
       if (url.endsWith("/candidates/c1") && init?.method === "PATCH") { const body = JSON.parse(String(init.body)); Object.assign(candidate, body, { review_status: "edited" }); return response(candidate); }
       if (url.endsWith("/candidates/c1/review") && init?.method === "PATCH") { const body = JSON.parse(String(init.body)); Object.assign(candidate, { review_status: body.status, selected_for_render: body.status === "rejected" ? false : candidate.selected_for_render }); return response(candidate); }
       if (url.endsWith("/candidates/c1/selection") && init?.method === "PATCH") { const body = JSON.parse(String(init.body)); if (candidate.review_status !== "approved" && body.selected) return response({ detail: "Only approved candidates can be selected" }, 409); Object.assign(candidate, { selected_for_render: body.selected }); return response(candidate); }
+      if (url.endsWith("/api/projects/p1/render") && init?.method === "POST") { renderedCandidateIds = JSON.parse(String(init.body)).candidate_ids; return response({ id: "r1", project_id: "p1", status: "completed", stage: "completed", progress_percent: 100, error_message: null, output_profile: "vertical", candidate_count: renderedCandidateIds.length, started_at: null, completed_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }, 202); }
       return response({ detail: "Not found" }, 404);
     }));
     render(<App />);
     fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Open Test project" }));
+    fireEvent.change(screen.getByLabelText("Detection mode"), { target: { value: "comedy" } });
+    expect(screen.getByLabelText("Content profile")).toHaveProperty("value", "podcast_conversation");
     fireEvent.click(screen.getByRole("button", { name: "Find Highlights" }));
+    expect(requestedMode).toBe("comedy");
+    expect(requestedProfile).toBe("podcast_conversation");
+    expect((window.confirm as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toContain("cannot analyse facial expressions");
     expect(await screen.findByText("Calling Gemini")).toBeTruthy();
+    expect(await screen.findByText(/Detection mode: Funny moments \/ comedy/)).toBeTruthy();
     candidates = [candidate];
     expect(await screen.findByText("Strong moment")).toBeTruthy();
+    expect(await screen.findByText("Comedy potential: 91/100")).toBeTruthy();
+    expect(await screen.findByText("Why this may be funny: The reply unexpectedly flips the earlier setup.")).toBeTruthy();
     const preview = screen.getByLabelText("Preview Strong moment") as HTMLVideoElement;
     expect(preview.getAttribute("src")).toContain("/api/projects/p1/source-video/preview");
     Object.defineProperty(preview, "currentTime", { configurable: true, writable: true, value: 0 });
@@ -276,9 +421,13 @@ describe("application interface", () => {
     fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Open Test project" }));
     expect(await screen.findByText("Selected for rendering: 1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Render selected clips" }));
+    await waitFor(() => expect(renderedCandidateIds).toEqual(["c1"]));
     fireEvent.click(screen.getByRole("button", { name: "Reject" }));
     await waitFor(() => expect(candidate.review_status).toBe("rejected"));
     expect(candidate.selected_for_render).toBe(false);
     expect(await screen.findByText("Selected for rendering: 0")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Render selected clips" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("No candidates are selected");
   });
 });

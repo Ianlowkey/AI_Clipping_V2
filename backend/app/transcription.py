@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.core.config import settings
+from app import diarization
 from app.video import VideoPreparationError, prepare_video
 
 logger = logging.getLogger(__name__)
@@ -135,11 +136,15 @@ def _write_outputs(transcript_dir: Path, payload: dict) -> dict[str, str]:
         text_path = stage_dir / "transcript.txt"
         srt_path = stage_dir / "transcript.srt"
         words_path = stage_dir / "words.json"
-        text_path.write_text("\n".join(segment["text"] for segment in payload["segments"]), encoding="utf-8")
+        text_lines = []
+        for segment in payload["segments"]:
+            text_lines.append(_format_transcript_segment(segment, payload))
+        text_path.write_text("\n".join(text_lines), encoding="utf-8")
         cues = []
         for index, segment in enumerate(payload["segments"], start=1):
             end = max(segment["end"], segment["start"] + 0.001)
-            cues.append(f"{index}\n{_srt_time(segment['start'])} --> {_srt_time(end)}\n{segment['text']}\n")
+            text = _format_transcript_segment(segment, payload)
+            cues.append(f"{index}\n{_srt_time(segment['start'])} --> {_srt_time(end)}\n{text}\n")
         srt_path.write_text("\n".join(cues), encoding="utf-8")
         words_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         targets = {
@@ -152,6 +157,29 @@ def _write_outputs(transcript_dir: Path, payload: dict) -> dict[str, str]:
         return {key: str(path) for key, path in targets.items()}
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _format_transcript_segment(segment: dict, payload: dict) -> str:
+    speakers = payload.get("speakers") or []
+    labels = {speaker.get("speaker_id"): speaker.get("label") for speaker in speakers}
+    diarization_ran = payload.get("diarization_status") in {"complete", "incomplete"}
+    words = segment.get("words") or []
+    if words and (diarization_ran or any(word.get("speaker_id") for word in words)):
+        groups: list[tuple[str, str]] = []
+        for word in words:
+            speaker_id = word.get("speaker_id")
+            label = labels.get(speaker_id) if speaker_id else None
+            label = label or "Unknown speaker"
+            if groups and groups[-1][0] == label:
+                groups[-1] = (label, groups[-1][1] + str(word.get("text", "")))
+            else:
+                groups.append((label, str(word.get("text", ""))))
+        return " | ".join(f"{label}: {text.strip()}" for label, text in groups)
+    speaker_id = segment.get("speaker_id")
+    label = labels.get(speaker_id) if speaker_id else None
+    if label:
+        return f"{label}: {segment['text']}"
+    return f"Unknown speaker: {segment['text']}" if diarization_ran else segment["text"]
 
 
 def _diagnostic_text(text: str, *paths: Path) -> str:
@@ -303,7 +331,8 @@ def transcribe_video(
         return _transcribe_chunks(
             chunks, project_id, source_filename, transcript_dir, stage_callback,
             model_size=model_size, language=language,
-            duration=media.get("duration_seconds"),
+            duration=media.get("duration_seconds"), source_path=source_path,
+            source_offset_seconds=source_offset,
         )
     finally:
         shutil.rmtree(audio_work_dir, ignore_errors=True)
@@ -318,6 +347,8 @@ def _transcribe_chunks(
     model_size: str | None,
     language: str | None,
     duration: float | None,
+    source_path: Path,
+    source_offset_seconds: float = 0.0,
 ) -> dict:
 
     chosen_model = model_size or settings.whisper_model_size
@@ -381,6 +412,14 @@ def _transcribe_chunks(
     language_probability = getattr(info, "language_probability", None)
     duration = duration or getattr(info, "duration", None)
     timestamp = datetime.now(timezone.utc).isoformat()
+    diarization_state = diarization.availability()
+    if diarization_state["available"]:
+        stage_callback("diarizing", "Estimating speaker turns locally", selected_device)
+        diarized = diarization.diarize_file(source_path, words, segments, source_offset_seconds)
+        words, segments = diarized["words"], diarized["segments"]
+    else:
+        diarized = {"speakers": [], "speaker_turns": [], "status": "unavailable",
+                    "detail": diarization_state.get("detail", "unavailable"), "message": diarization_state["message"]}
     payload = {
         "project_id": project_id,
         "source_filename": source_filename,
@@ -391,6 +430,11 @@ def _transcribe_chunks(
         "compute_type": compute_type,
         "processed_at": timestamp,
         "duration_seconds": duration,
+        "speakers": diarized["speakers"],
+        "speaker_turns": diarized["speaker_turns"],
+        "diarization_status": diarized["status"],
+        "diarization_detail": diarized.get("detail"),
+        "diarization_message": diarized["message"],
         "segments": segments,
         "words": words,
     }

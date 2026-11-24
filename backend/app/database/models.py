@@ -51,6 +51,8 @@ class ProcessingJob(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     job_type: Mapped[str] = mapped_column(String(32), nullable=False, default="generic")
+    detection_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="general")
+    content_profile: Mapped[str] = mapped_column(String(32), nullable=False, default="podcast_conversation")
     stage: Mapped[str | None] = mapped_column(String(40))
     active_project_id: Mapped[str | None] = mapped_column(String(36), unique=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
@@ -60,6 +62,8 @@ class ProcessingJob(Base):
     device: Mapped[str | None] = mapped_column(String(32))
     compute_type: Mapped[str | None] = mapped_column(String(32))
     language: Mapped[str | None] = mapped_column(String(16))
+    output_profile: Mapped[str | None] = mapped_column(String(20))
+    candidate_ids_json: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None]
     completed_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
@@ -110,8 +114,16 @@ class HighlightCandidate(Base):
     engagement_potential: Mapped[int | None] = mapped_column(Integer)
     standalone_clarity: Mapped[int | None] = mapped_column(Integer)
     emotional_value: Mapped[int | None] = mapped_column(Integer)
+    conversational_engagement: Mapped[int | None] = mapped_column(Integer)
+    storytelling_interest: Mapped[int | None] = mapped_column(Integer)
+    surprise_potential: Mapped[int | None] = mapped_column(Integer)
+    emotional_impact: Mapped[int | None] = mapped_column(Integer)
+    clip_completeness: Mapped[int | None] = mapped_column(Integer)
+    speaker_context: Mapped[str | None] = mapped_column(Text)
     review_status: Mapped[str] = mapped_column(String(20), default="suggested", nullable=False)
     selected_for_render: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    comedy_potential: Mapped[int | None] = mapped_column(Integer)
+    comedy_explanation: Mapped[str | None] = mapped_column(Text)
     validation_warnings: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
 
@@ -125,6 +137,11 @@ class Clip(Base):
     file_path: Mapped[str | None] = mapped_column(Text)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
+    output_profile: Mapped[str | None] = mapped_column(String(20))
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    media_metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
 
 

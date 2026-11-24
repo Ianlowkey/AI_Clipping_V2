@@ -1,6 +1,6 @@
 # Known Issues
 
-- Phase 1 does not yet include video-processing dependencies or features.
+- Word-timed caption rendering remains unimplemented; this checkpoint completes Phase 2E and stops before Phase 2F.
 - Rust and Windows build tools must be available before the Tauri shell can build.
 - The application icon is not yet included.
 - The backend is not yet launched automatically by Tauri.
